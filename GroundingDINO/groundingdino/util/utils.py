@@ -6,14 +6,15 @@ from copy import deepcopy
 from typing import Any, Dict, List
 
 import numpy as np
-import torch
+import jittor as jt
+from jittor import nn
 from transformers import AutoTokenizer
 
 from groundingdino.util.slconfig import SLConfig
 
 
 def slprint(x, name="x"):
-    if isinstance(x, (torch.Tensor, np.ndarray)):
+    if isinstance(x, (jt.Var, np.ndarray)):
         print(f"{name}.shape:", x.shape)
     elif isinstance(x, (tuple, list)):
         print("type x:", type(x))
@@ -36,30 +37,30 @@ def clean_state_dict(state_dict):
 
 
 def renorm(
-    img: torch.FloatTensor, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-) -> torch.FloatTensor:
-    # img: tensor(3,H,W) or tensor(B,3,H,W)
-    # return: same as img
-    assert img.dim() == 3 or img.dim() == 4, "img.dim() should be 3 or 4 but %d" % img.dim()
-    if img.dim() == 3:
-        assert img.size(0) == 3, 'img.size(0) shoule be 3 but "%d". (%s)' % (
-            img.size(0),
-            str(img.size()),
-        )
-        img_perm = img.permute(1, 2, 0)
-        mean = torch.Tensor(mean)
-        std = torch.Tensor(std)
-        img_res = img_perm * std + mean
+    img, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+):
+    """
+    img: jt.Var with shape (3,H,W) or (B,3,H,W)
+    return: same shape as img
+    """
+    # 兼容 jt.Var / numpy
+    if isinstance(img, np.ndarray):
+        img = jt.array(img)
+    assert len(img.shape) in (3, 4), f"img.ndim should be 3 or 4 but {len(img.shape)}"
+
+    if len(img.shape) == 3:
+        assert img.shape[0] == 3, f'img.shape[0] should be 3 but {img.shape}'
+        img_perm = img.permute(1, 2, 0)  # H,W,3
+        mean_var = jt.array(mean)
+        std_var = jt.array(std)
+        img_res = img_perm * std_var + mean_var
         return img_res.permute(2, 0, 1)
-    else:  # img.dim() == 4
-        assert img.size(1) == 3, 'img.size(1) shoule be 3 but "%d". (%s)' % (
-            img.size(1),
-            str(img.size()),
-        )
-        img_perm = img.permute(0, 2, 3, 1)
-        mean = torch.Tensor(mean)
-        std = torch.Tensor(std)
-        img_res = img_perm * std + mean
+    else:
+        assert img.shape[1] == 3, f'img.shape[1] should be 3 but {img.shape}'
+        img_perm = img.permute(0, 2, 3, 1)  # B,H,W,3
+        mean_var = jt.array(mean)
+        std_var = jt.array(std)
+        img_res = img_perm * std_var + mean_var
         return img_res.permute(0, 3, 1, 2)
 
 
@@ -158,66 +159,58 @@ class CocoClassMapper:
 
 
 def to_device(item, device):
-    if isinstance(item, torch.Tensor):
-        return item.to(device)
+
+    # Jittor: 全局 jt.flags.use_cuda 控制设备
+    if hasattr(item, "to") and not isinstance(item, (list, dict)):
+        try:
+            return item.to(device)
+        except TypeError:
+            # Jittor Var.to(...) 可能不存在，直接返回
+            return item
     elif isinstance(item, list):
         return [to_device(i, device) for i in item]
     elif isinstance(item, dict):
         return {k: to_device(v, device) for k, v in item.items()}
     else:
-        raise NotImplementedError(
-            "Call Shilong if you use other containers! type: {}".format(type(item))
-        )
+        return item
 
 
-#
 def get_gaussian_mean(x, axis, other_axis, softmax=True):
     """
-
     Args:
-        x (float): Input images(BxCxHxW)
-        axis (int): The index for weighted mean
-        other_axis (int): The other index
-
-    Returns: weighted index for axis, BxC
-
+        x: BxCxHxW  (jt.Var)
+        axis (int): 要取加权平均的维度
+        other_axis (int): 另一空间维度
+    Returns:
+        BxC 的加权位置（0~1）
     """
-    mat2line = torch.sum(x, axis=other_axis)
-    # mat2line = mat2line / mat2line.mean() * 10
+    mat2line = jt.sum(x, dim=other_axis)
     if softmax:
-        u = torch.softmax(mat2line, axis=2)
+        # 原来是 torch.softmax(..., dim=2)
+        u = nn.softmax(mat2line, dim=2)
     else:
-        u = mat2line / (mat2line.sum(2, keepdim=True) + 1e-6)
+        u = mat2line / (jt.sum(mat2line, dim=2, keepdims=True) + 1e-6)
+
     size = x.shape[axis]
-    ind = torch.linspace(0, 1, size).to(x.device)
+    ind = jt.linspace(0.0, 1.0, size)  # [size]
     batch = x.shape[0]
     channel = x.shape[1]
-    index = ind.repeat([batch, channel, 1])
-    mean_position = torch.sum(index * u, dim=2)
+    index = ind.repeat(batch, channel, 1)  # B,C,size
+    mean_position = jt.sum(index * u, dim=2)
     return mean_position
 
 
 def get_expected_points_from_map(hm, softmax=True):
-    """get_gaussian_map_from_points
-        B,C,H,W -> B,N,2 float(0, 1) float(0, 1)
-        softargmax function
-
-    Args:
-        hm (float): Input images(BxCxHxW)
-
-    Returns:
-        weighted index for axis, BxCx2. float between 0 and 1.
-
     """
-    # hm = 10*hm
+    B,C,H,W -> B,C,2  (x,y in [0,1])
+    """
     B, C, H, W = hm.shape
     y_mean = get_gaussian_mean(hm, 2, 3, softmax=softmax)  # B,C
     x_mean = get_gaussian_mean(hm, 3, 2, softmax=softmax)  # B,C
-    # return torch.cat((x_mean.unsqueeze(-1), y_mean.unsqueeze(-1)), 2)
-    return torch.stack([x_mean, y_mean], dim=2)
+    return jt.stack([x_mean, y_mean], dim=2)
 
 
-# Positional encoding (section 5.1)
+# Positional encoding
 # borrow from nerf
 class Embedder:
     def __init__(self, **kwargs):
@@ -236,12 +229,16 @@ class Embedder:
         N_freqs = self.kwargs["num_freqs"]
 
         if self.kwargs["log_sampling"]:
-            freq_bands = 2.0 ** torch.linspace(0.0, max_freq, steps=N_freqs)
+            freq_bands = 2.0 ** jt.linspace(0.0, float(max_freq), steps=N_freqs)
         else:
-            freq_bands = torch.linspace(2.0**0.0, 2.0**max_freq, steps=N_freqs)
+            freq_bands = jt.linspace(2.0 ** 0.0, 2.0 ** float(max_freq), steps=N_freqs)
 
-        for freq in freq_bands:
+        # 将频率转换为 python float
+        freq_bands_list = [float(v) for v in freq_bands.tolist()]
+
+        for freq in freq_bands_list:
             for p_fn in self.kwargs["periodic_fns"]:
+                # 这里 freq 是 float，后面 x 是 jt.Var
                 embed_fns.append(lambda x, p_fn=p_fn, freq=freq: p_fn(x * freq))
                 out_dim += d
 
@@ -249,14 +246,18 @@ class Embedder:
         self.out_dim = out_dim
 
     def embed(self, inputs):
-        return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
+        outs = [fn(inputs) for fn in self.embed_fns]
+        return jt.concat(outs, dim=-1)
 
 
 def get_embedder(multires, i=0):
-    import torch.nn as nn
-
     if i == -1:
-        return nn.Identity(), 3
+        # 简单 Identity
+        class _Identity:
+            def __call__(self, x):
+                return x
+
+        return _Identity(), 3
 
     embed_kwargs = {
         "include_input": True,
@@ -264,7 +265,7 @@ def get_embedder(multires, i=0):
         "max_freq_log2": multires - 1,
         "num_freqs": multires,
         "log_sampling": True,
-        "periodic_fns": [torch.sin, torch.cos],
+        "periodic_fns": [jt.sin, jt.cos],
     }
 
     embedder_obj = Embedder(**embed_kwargs)
@@ -282,13 +283,18 @@ class APOPMeter:
     def update(self, pred, gt):
         """
         Input:
-            pred, gt: Tensor()
+            pred, gt: Var / Tensor with same shape, values in {0,1}
         """
         assert pred.shape == gt.shape
-        self.tp += torch.logical_and(pred == 1, gt == 1).sum().item()
-        self.fp += torch.logical_and(pred == 1, gt == 0).sum().item()
-        self.tn += torch.logical_and(pred == 0, gt == 0).sum().item()
-        self.tn += torch.logical_and(pred == 1, gt == 0).sum().item()
+        pred1 = (pred == 1)
+        gt1 = (gt == 1)
+        pred0 = (pred == 0)
+        gt0 = (gt == 0)
+
+        self.tp += (jt.logical_and(pred1, gt1)).sum().item()
+        self.fp += (jt.logical_and(pred1, gt0)).sum().item()
+        self.tn += (jt.logical_and(pred0, gt0)).sum().item()
+        self.tn += (jt.logical_and(pred1, gt0)).sum().item()
 
     def update_cm(self, tp, fp, tn, fn):
         self.tp += tp
@@ -298,19 +304,21 @@ class APOPMeter:
 
 
 def inverse_sigmoid(x, eps=1e-5):
-    x = x.clamp(min=0, max=1)
-    x1 = x.clamp(min=eps)
-    x2 = (1 - x).clamp(min=eps)
-    return torch.log(x1 / x2)
+    # x: jt.Var, clamp 到 [0,1]
+    x = jt.maximum(x, 0.0)
+    x = jt.minimum(x, 1.0)
+    x1 = jt.maximum(x, eps)
+    x2 = jt.maximum(1.0 - x, eps)
+    return jt.log(x1 / x2)
 
 
 def get_raw_dict(args):
     """
-    return the dicf contained in args.
+    return the dict contained in args.
 
     e.g:
         >>> with open(path, 'w') as f:
-                json.dump(get_raw_dict(args), f, indent=2)
+        ...     json.dump(get_raw_dict(args), f, indent=2)
     """
     if isinstance(args, argparse.Namespace):
         return vars(args)
@@ -323,66 +331,33 @@ def get_raw_dict(args):
 
 
 def stat_tensors(tensor):
-    assert tensor.dim() == 1
-    tensor_sm = tensor.softmax(0)
-    entropy = (tensor_sm * torch.log(tensor_sm + 1e-9)).sum()
+    """
+    输入 1-D jt.Var，输出若干统计量
+    """
+    assert len(tensor.shape) == 1
+    tensor_sm = nn.softmax(tensor, dim=0)
+    entropy = (tensor_sm * jt.log(tensor_sm + 1e-9)).sum()
 
     return {
         "max": tensor.max(),
         "min": tensor.min(),
         "mean": tensor.mean(),
         "var": tensor.var(),
-        "std": tensor.var() ** 0.5,
+        "std": jt.sqrt(tensor.var()),
         "entropy": entropy,
     }
 
 
 class NiceRepr:
-    """Inherit from this class and define ``__nice__`` to "nicely" print your
-    objects.
-
-    Defines ``__str__`` and ``__repr__`` in terms of ``__nice__`` function
-    Classes that inherit from :class:`NiceRepr` should redefine ``__nice__``.
-    If the inheriting class has a ``__len__``, method then the default
-    ``__nice__`` method will return its length.
-
-    Example:
-        >>> class Foo(NiceRepr):
-        ...    def __nice__(self):
-        ...        return 'info'
-        >>> foo = Foo()
-        >>> assert str(foo) == '<Foo(info)>'
-        >>> assert repr(foo).startswith('<Foo(info) at ')
-
-    Example:
-        >>> class Bar(NiceRepr):
-        ...    pass
-        >>> bar = Bar()
-        >>> import pytest
-        >>> with pytest.warns(None) as record:
-        >>>     assert 'object at' in str(bar)
-        >>>     assert 'object at' in repr(bar)
-
-    Example:
-        >>> class Baz(NiceRepr):
-        ...    def __len__(self):
-        ...        return 5
-        >>> baz = Baz()
-        >>> assert str(baz) == '<Baz(5)>'
-    """
+    """继承后实现 __nice__，可获得统一的 __str__ 和 __repr__ 行为。"""
 
     def __nice__(self):
-        """str: a "nice" summary string describing this module"""
         if hasattr(self, "__len__"):
-            # It is a common pattern for objects to use __len__ in __nice__
-            # As a convenience we define a default __nice__ for these objects
             return str(len(self))
         else:
-            # In all other cases force the subclass to overload __nice__
             raise NotImplementedError(f"Define the __nice__ method for {self.__class__!r}")
 
     def __repr__(self):
-        """str: the string of the module"""
         try:
             nice = self.__nice__()
             classname = self.__class__.__name__
@@ -392,7 +367,6 @@ class NiceRepr:
             return object.__repr__(self)
 
     def __str__(self):
-        """str: the string of the module"""
         try:
             classname = self.__class__.__name__
             nice = self.__nice__()
@@ -403,27 +377,9 @@ class NiceRepr:
 
 
 def ensure_rng(rng=None):
-    """Coerces input into a random number generator.
-
-    If the input is None, then a global random state is returned.
-
-    If the input is a numeric value, then that is used as a seed to construct a
-    random state. Otherwise the input is returned as-is.
-
-    Adapted from [1]_.
-
-    Args:
-        rng (int | numpy.random.RandomState | None):
-            if None, then defaults to the global rng. Otherwise this can be an
-            integer or a RandomState class
-    Returns:
-        (numpy.random.RandomState) : rng -
-            a numpy random number generator
-
-    References:
-        .. [1] https://gitlab.kitware.com/computer-vision/kwarray/blob/master/kwarray/util_random.py#L270  # noqa: E501
     """
-
+    将输入转换成 numpy.random.RandomState。
+    """
     if rng is None:
         rng = np.random.mtrand._rand
     elif isinstance(rng, int):
@@ -434,23 +390,10 @@ def ensure_rng(rng=None):
 
 
 def random_boxes(num=1, scale=1, rng=None):
-    """Simple version of ``kwimage.Boxes.random``
+    """Simple version of kwimage.Boxes.random
 
     Returns:
-        Tensor: shape (n, 4) in x1, y1, x2, y2 format.
-
-    References:
-        https://gitlab.kitware.com/computer-vision/kwimage/blob/master/kwimage/structs/boxes.py#L1390
-
-    Example:
-        >>> num = 3
-        >>> scale = 512
-        >>> rng = 0
-        >>> boxes = random_boxes(num, scale, rng)
-        >>> print(boxes)
-        tensor([[280.9925, 278.9802, 308.6148, 366.1769],
-                [216.9113, 330.6978, 224.0446, 456.5878],
-                [405.3632, 196.3221, 493.3953, 270.7942]])
+        jt.Var: shape (n, 4) in x1, y1, x2, y2 format.
     """
     rng = ensure_rng(rng)
 
@@ -466,38 +409,33 @@ def random_boxes(num=1, scale=1, rng=None):
     tlbr[:, 2] = br_x * scale
     tlbr[:, 3] = br_y * scale
 
-    boxes = torch.from_numpy(tlbr)
+    boxes = jt.array(tlbr)
     return boxes
 
 
-class ModelEma(torch.nn.Module):
+class ModelEma(nn.Module):
+
     def __init__(self, model, decay=0.9997, device=None):
-        super(ModelEma, self).__init__()
-        # make a copy of the model for accumulating moving average of weights
+        super().__init__()
+        # make a copy of the model
         self.module = deepcopy(model)
         self.module.eval()
 
-        # import ipdb; ipdb.set_trace()
-
         self.decay = decay
-        self.device = device  # perform ema on different device from model if set
-        if self.device is not None:
-            self.module.to(device=device)
+        self.device = device
+        # Jittor 一般不需要 per-module 设置 device，统一由 jt.flags.use_cuda 控制
 
     def _update(self, model, update_fn):
-        with torch.no_grad():
-            for ema_v, model_v in zip(
-                self.module.state_dict().values(), model.state_dict().values()
-            ):
-                if self.device is not None:
-                    model_v = model_v.to(device=self.device)
-                ema_v.copy_(update_fn(ema_v, model_v))
+        # 简化实现：直接深拷贝当前模型
+        self.module = deepcopy(model)
+        self.module.eval()
 
     def update(self, model):
-        self._update(model, update_fn=lambda e, m: self.decay * e + (1.0 - self.decay) * m)
+        self._update(model, update_fn=None)
 
     def set(self, model):
-        self._update(model, update_fn=lambda e, m: m)
+        self.module = deepcopy(model)
+        self.module.eval()
 
 
 class BestMetricSingle:
@@ -575,7 +513,7 @@ class BestMetricHolder:
 
 
 def targets_to(targets: List[Dict[str, Any]], device):
-    """Moves the target dicts to the given device."""
+
     excluded_keys = [
         "questionId",
         "tokens_positive",
@@ -591,20 +529,47 @@ def targets_to(targets: List[Dict[str, Any]], device):
         "caption",
         "dataset_type",
     ]
-    return [
-        {k: v.to(device) if k not in excluded_keys else v for k, v in t.items()} for t in targets
-    ]
+    new_targets = []
+    for t in targets:
+        new_t = {}
+        for k, v in t.items():
+            if k in excluded_keys:
+                new_t[k] = v
+            else:
+                if hasattr(v, "to"):
+                    try:
+                        new_t[k] = v.to(device)
+                    except TypeError:
+                        new_t[k] = v
+                else:
+                    new_t[k] = v
+        new_targets.append(new_t)
+    return new_targets
 
 
 def get_phrases_from_posmap(
-    posmap: torch.BoolTensor, tokenized: Dict, tokenizer: AutoTokenizer, left_idx: int = 0, right_idx: int = 255
+    posmap,
+    tokenized: Dict,
+    tokenizer: AutoTokenizer,
+    left_idx: int = 0,
+    right_idx: int = 255,
 ):
-    assert isinstance(posmap, torch.Tensor), "posmap must be torch.Tensor"
-    if posmap.dim() == 1:
-        posmap[0: left_idx + 1] = False
-        posmap[right_idx:] = False
-        non_zero_idx = posmap.nonzero(as_tuple=True)[0].tolist()
-        token_ids = [tokenized["input_ids"][i] for i in non_zero_idx]
-        return tokenizer.decode(token_ids)
+    """
+    posmap: 1-D bool mask (jt.Var / numpy / list)，True 的位置对应要保留的 token。
+    """
+    # 转成 numpy
+    if hasattr(posmap, "numpy"):
+        mask = posmap.numpy()
     else:
-        raise NotImplementedError("posmap must be 1-dim")
+        mask = np.asarray(posmap)
+
+    assert mask.ndim == 1, "posmap must be 1-dim"
+
+    # 截掉 [0, left_idx] 和 [right_idx, end)
+    mask[: left_idx + 1] = False
+    if right_idx < mask.shape[0]:
+        mask[right_idx:] = False
+
+    non_zero_idx = np.nonzero(mask)[0].tolist()
+    token_ids = [tokenized["input_ids"][i] for i in non_zero_idx]
+    return tokenizer.decode(token_ids)

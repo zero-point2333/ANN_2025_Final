@@ -1,8 +1,9 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 """
-Misc functions, including distributed helpers.
+Misc functions, including helpers.
 
-Mostly copy-paste from torchvision references.
+Originally adapted from torchvision references; this version has been
+ported to work with Jittor instead of PyTorch.
 """
 import colorsys
 import datetime
@@ -17,17 +18,8 @@ from collections import OrderedDict, defaultdict, deque
 from typing import List, Optional
 
 import numpy as np
-import torch
-import torch.distributed as dist
-
-# needed due to empty tensor bug in pytorch and torchvision 0.5
-import torchvision
-from torch import Tensor
-
-__torchvision_need_compat_flag = float(torchvision.__version__.split(".")[1]) < 7
-if __torchvision_need_compat_flag:
-    from torchvision.ops import _new_empty_tensor
-    from torchvision.ops.misc import _output_size
+import jittor as jt
+import jittor.nn as nn
 
 
 class SmoothedValue(object):
@@ -44,49 +36,50 @@ class SmoothedValue(object):
         self.fmt = fmt
 
     def update(self, value, n=1):
-        self.deque.append(value)
+        self.deque.append(float(value))
         self.count += n
-        self.total += value * n
+        self.total += float(value) * n
 
     def synchronize_between_processes(self):
         """
-        Warning: does not synchronize the deque!
+        In the original PyTorch version this synchronized across processes.
+        In the Jittor port we run in single-process mode, so this is a no-op.
         """
-        if not is_dist_avail_and_initialized():
-            return
-        t = torch.tensor([self.count, self.total], dtype=torch.float64, device="cuda")
-        dist.barrier()
-        dist.all_reduce(t)
-        t = t.tolist()
-        self.count = int(t[0])
-        self.total = t[1]
+        return
 
     @property
     def median(self):
-        d = torch.tensor(list(self.deque))
-        if d.shape[0] == 0:
-            return 0
-        return d.median().item()
+        if len(self.deque) == 0:
+            return 0.0
+        d = np.asarray(self.deque, dtype=np.float64)
+        return float(np.median(d))
 
     @property
     def avg(self):
-        d = torch.tensor(list(self.deque), dtype=torch.float32)
-        return d.mean().item()
+        if len(self.deque) == 0:
+            return 0.0
+        d = np.asarray(self.deque, dtype=np.float32)
+        return float(np.mean(d))
 
     @property
     def global_avg(self):
+        # keep the small epsilon logic to avoid division by zero
         if os.environ.get("SHILONG_AMP", None) == "1":
             eps = 1e-4
         else:
             eps = 1e-6
-        return self.total / (self.count + eps)
+        return float(self.total) / float(self.count + eps)
 
     @property
     def max(self):
+        if len(self.deque) == 0:
+            return 0.0
         return max(self.deque)
 
     @property
     def value(self):
+        if len(self.deque) == 0:
+            return 0.0
         return self.deque[-1]
 
     def __str__(self):
@@ -102,158 +95,59 @@ class SmoothedValue(object):
 @functools.lru_cache()
 def _get_global_gloo_group():
     """
-    Return a process group based on gloo backend, containing all the ranks
-    The result is cached.
+    Placeholder kept for API compatibility. In this Jittor port,
+    distributed training is disabled, so this simply returns None.
     """
-
-    if dist.get_backend() == "nccl":
-        return dist.new_group(backend="gloo")
-
-    return dist.group.WORLD
+    return None
 
 
 def all_gather_cpu(data):
     """
-    Run all_gather on arbitrary picklable data (not necessarily tensors)
-    Args:
-        data: any picklable object
-    Returns:
-        list[data]: list of data gathered from each rank
+    Run all_gather on arbitrary picklable data (not necessarily tensors).
+
+    Jittor port note:
+        We only support single-process execution here, so this
+        function simply wraps the input in a list.
     """
-
-    world_size = get_world_size()
-    if world_size == 1:
-        return [data]
-
-    cpu_group = _get_global_gloo_group()
-
-    buffer = io.BytesIO()
-    torch.save(data, buffer)
-    data_view = buffer.getbuffer()
-    device = "cuda" if cpu_group is None else "cpu"
-    tensor = torch.ByteTensor(data_view).to(device)
-
-    # obtain Tensor size of each rank
-    local_size = torch.tensor([tensor.numel()], device=device, dtype=torch.long)
-    size_list = [torch.tensor([0], device=device, dtype=torch.long) for _ in range(world_size)]
-    if cpu_group is None:
-        dist.all_gather(size_list, local_size)
-    else:
-        print("gathering on cpu")
-        dist.all_gather(size_list, local_size, group=cpu_group)
-    size_list = [int(size.item()) for size in size_list]
-    max_size = max(size_list)
-    assert isinstance(local_size.item(), int)
-    local_size = int(local_size.item())
-
-    # receiving Tensor from all ranks
-    # we pad the tensor because torch all_gather does not support
-    # gathering tensors of different shapes
-    tensor_list = []
-    for _ in size_list:
-        tensor_list.append(torch.empty((max_size,), dtype=torch.uint8, device=device))
-    if local_size != max_size:
-        padding = torch.empty(size=(max_size - local_size,), dtype=torch.uint8, device=device)
-        tensor = torch.cat((tensor, padding), dim=0)
-    if cpu_group is None:
-        dist.all_gather(tensor_list, tensor)
-    else:
-        dist.all_gather(tensor_list, tensor, group=cpu_group)
-
-    data_list = []
-    for size, tensor in zip(size_list, tensor_list):
-        tensor = torch.split(tensor, [size, max_size - size], dim=0)[0]
-        buffer = io.BytesIO(tensor.cpu().numpy())
-        obj = torch.load(buffer)
-        data_list.append(obj)
-
-    return data_list
+    return [data]
 
 
 def all_gather(data):
     """
-    Run all_gather on arbitrary picklable data (not necessarily tensors)
-    Args:
-        data: any picklable object
-    Returns:
-        list[data]: list of data gathered from each rank
+    Run all_gather on arbitrary picklable data (not necessarily tensors).
+
+    Jittor port note:
+        We only support single-process execution here, so this
+        function simply wraps the input in a list.
     """
-
-    if os.getenv("CPU_REDUCE") == "1":
-        return all_gather_cpu(data)
-
-    world_size = get_world_size()
-    if world_size == 1:
-        return [data]
-
-    # serialized to a Tensor
-    buffer = pickle.dumps(data)
-    storage = torch.ByteStorage.from_buffer(buffer)
-    tensor = torch.ByteTensor(storage).to("cuda")
-
-    # obtain Tensor size of each rank
-    local_size = torch.tensor([tensor.numel()], device="cuda")
-    size_list = [torch.tensor([0], device="cuda") for _ in range(world_size)]
-    dist.all_gather(size_list, local_size)
-    size_list = [int(size.item()) for size in size_list]
-    max_size = max(size_list)
-
-    # receiving Tensor from all ranks
-    # we pad the tensor because torch all_gather does not support
-    # gathering tensors of different shapes
-    tensor_list = []
-    for _ in size_list:
-        tensor_list.append(torch.empty((max_size,), dtype=torch.uint8, device="cuda"))
-    if local_size != max_size:
-        padding = torch.empty(size=(max_size - local_size,), dtype=torch.uint8, device="cuda")
-        tensor = torch.cat((tensor, padding), dim=0)
-    dist.all_gather(tensor_list, tensor)
-
-    data_list = []
-    for size, tensor in zip(size_list, tensor_list):
-        buffer = tensor.cpu().numpy().tobytes()[:size]
-        data_list.append(pickle.loads(buffer))
-
-    return data_list
+    return [data]
 
 
 def reduce_dict(input_dict, average=True):
     """
-    Args:
-        input_dict (dict): all the values will be reduced
-        average (bool): whether to do average or sum
     Reduce the values in the dictionary from all processes so that all processes
-    have the averaged results. Returns a dict with the same fields as
-    input_dict, after reduction.
+    have the averaged results.
+
+    Jittor port note:
+        Since we only run in single-process mode, this is effectively a no-op.
     """
-    world_size = get_world_size()
-    if world_size < 2:
-        return input_dict
-    with torch.no_grad():
-        names = []
-        values = []
-        # sort the keys so that they are consistent across processes
-        for k in sorted(input_dict.keys()):
-            names.append(k)
-            values.append(input_dict[k])
-        values = torch.stack(values, dim=0)
-        dist.all_reduce(values)
-        if average:
-            values /= world_size
-        reduced_dict = {k: v for k, v in zip(names, values)}
-    return reduced_dict
+    return input_dict
 
 
 class MetricLogger(object):
-    def __init__(self, delimiter="\t"):
+    def __init__(self, delimiter: str = "\t"):
         self.meters = defaultdict(SmoothedValue)
         self.delimiter = delimiter
 
     def update(self, **kwargs):
         for k, v in kwargs.items():
-            if isinstance(v, torch.Tensor):
-                v = v.item()
-            assert isinstance(v, (float, int))
+            # Support Jittor Var, numpy scalar and Python scalar
+            if isinstance(v, jt.Var):
+                # Jittor 标量：先转 numpy，再转成 Python float
+                v = float(v.numpy())
+            elif isinstance(v, np.generic):
+                v = float(v)
+            assert isinstance(v, (float, int)), f"Metric {k} must be float or int, got {type(v)}"
             self.meters[k].update(v)
 
     def __getattr__(self, attr):
@@ -266,8 +160,6 @@ class MetricLogger(object):
     def __str__(self):
         loss_str = []
         for name, meter in self.meters.items():
-            # print(name, str(meter))
-            # import ipdb;ipdb.set_trace()
             if meter.count > 0:
                 loss_str.append("{}: {}".format(name, str(meter)))
         return self.delimiter.join(loss_str)
@@ -293,68 +185,43 @@ class MetricLogger(object):
         iter_time = SmoothedValue(fmt="{avg:.4f}")
         data_time = SmoothedValue(fmt="{avg:.4f}")
         space_fmt = ":" + str(len(str(len(iterable)))) + "d"
-        if torch.cuda.is_available():
-            log_msg = self.delimiter.join(
-                [
-                    header,
-                    "[{0" + space_fmt + "}/{1}]",
-                    "eta: {eta}",
-                    "{meters}",
-                    "time: {time}",
-                    "data: {data}",
-                    "max mem: {memory:.0f}",
-                ]
-            )
-        else:
-            log_msg = self.delimiter.join(
-                [
-                    header,
-                    "[{0" + space_fmt + "}/{1}]",
-                    "eta: {eta}",
-                    "{meters}",
-                    "time: {time}",
-                    "data: {data}",
-                ]
-            )
-        MB = 1024.0 * 1024.0
+
+        # In this Jittor port we do not track CUDA memory; keep log format simple.
+        log_msg = self.delimiter.join(
+            [
+                header,
+                "[{0" + space_fmt + "}/{1}]",
+                "eta: {eta}",
+                "{meters}",
+                "time: {time}",
+                "data: {data}",
+            ]
+        )
+
         for obj in iterable:
             data_time.update(time.time() - end)
             yield obj
-            # import ipdb; ipdb.set_trace()
             iter_time.update(time.time() - end)
             if i % print_freq == 0 or i == len(iterable) - 1:
                 eta_seconds = iter_time.global_avg * (len(iterable) - i)
                 eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
-                if torch.cuda.is_available():
-                    print_func(
-                        log_msg.format(
-                            i,
-                            len(iterable),
-                            eta=eta_string,
-                            meters=str(self),
-                            time=str(iter_time),
-                            data=str(data_time),
-                            memory=torch.cuda.max_memory_allocated() / MB,
-                        )
+                print_func(
+                    log_msg.format(
+                        i,
+                        len(iterable),
+                        eta=eta_string,
+                        meters=str(self),
+                        time=str(iter_time),
+                        data=str(data_time),
                     )
-                else:
-                    print_func(
-                        log_msg.format(
-                            i,
-                            len(iterable),
-                            eta=eta_string,
-                            meters=str(self),
-                            time=str(iter_time),
-                            data=str(data_time),
-                        )
-                    )
+                )
             i += 1
             end = time.time()
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         print_func(
             "{} Total time: {} ({:.4f} s / it)".format(
-                header, total_time_str, total_time / len(iterable)
+                header, total_time_str, total_time / max(len(iterable), 1)
             )
         )
 
@@ -381,15 +248,14 @@ def get_sha():
 
 
 def collate_fn(batch):
-    # import ipdb; ipdb.set_trace()
+    # batch is list of tuples (image, target, ...)
     batch = list(zip(*batch))
     batch[0] = nested_tensor_from_tensor_list(batch[0])
     return tuple(batch)
 
 
-def _max_by_axis(the_list):
-    # type: (List[List[int]]) -> List[int]
-    maxes = the_list[0]
+def _max_by_axis(the_list: List[List[int]]) -> List[int]:
+    maxes = list(the_list[0])
     for sublist in the_list[1:]:
         for index, item in enumerate(sublist):
             maxes[index] = max(maxes[index], item)
@@ -397,56 +263,65 @@ def _max_by_axis(the_list):
 
 
 class NestedTensor(object):
-    def __init__(self, tensors, mask: Optional[Tensor]):
+    """
+    Wrapper for a batched tensor and an associated mask.
+
+    Jittor port note:
+        Internally we store tensors and masks as numpy arrays to avoid
+        hard-binding to any tensor framework. Jittor modules can accept
+        numpy arrays directly and convert them to jt.Var when needed.
+    """
+
+    def __init__(self, tensors, mask: Optional[np.ndarray]):
+        # tensors: numpy array of shape (B, C, H, W) or (C, H, W)
         self.tensors = tensors
         self.mask = mask
+
         if mask == "auto":
-            self.mask = torch.zeros_like(tensors).to(tensors.device)
-            if self.mask.dim() == 3:
-                self.mask = self.mask.sum(0).to(bool)
-            elif self.mask.dim() == 4:
-                self.mask = self.mask.sum(1).to(bool)
+            # Automatically build a "no padding" mask
+            if self.tensors.ndim == 3:
+                _, h, w = self.tensors.shape
+                self.mask = np.zeros((h, w), dtype=bool)
+            elif self.tensors.ndim == 4:
+                b, _, h, w = self.tensors.shape
+                self.mask = np.zeros((b, h, w), dtype=bool)
             else:
                 raise ValueError(
-                    "tensors dim must be 3 or 4 but {}({})".format(
-                        self.tensors.dim(), self.tensors.shape
-                    )
+                    f"tensors dim must be 3 or 4 but got {self.tensors.ndim} ({self.tensors.shape})"
                 )
 
     def imgsize(self):
+        """Return a list of [H, W] for each image, inferred from the mask."""
+        if self.tensors.ndim != 4:
+            raise ValueError("imgsize only defined for batched (B, C, H, W) tensors")
         res = []
         for i in range(self.tensors.shape[0]):
-            mask = self.mask[i]
-            maxH = (~mask).sum(0).max()
-            maxW = (~mask).sum(1).max()
-            res.append(torch.Tensor([maxH, maxW]))
+            mask_i = self.mask[i]  # (H, W) bool, True = padding
+            inv = ~mask_i
+            # sum along axes to find extents of non-padding region
+            maxH = int(inv.sum(axis=0).max())
+            maxW = int(inv.sum(axis=1).max())
+            res.append(np.array([maxH, maxW], dtype=np.float32))
         return res
 
     def to(self, device):
-        # type: (Device) -> NestedTensor # noqa
-        cast_tensor = self.tensors.to(device)
-        mask = self.mask
-        if mask is not None:
-            assert mask is not None
-            cast_mask = mask.to(device)
-        else:
-            cast_mask = None
-        return NestedTensor(cast_tensor, cast_mask)
+        """
+        For compatibility with the original PyTorch API:
+        in Jittor we do not move data by device string here, so this is a no-op.
+        """
+        return self
 
     def to_img_list_single(self, tensor, mask):
-        assert tensor.dim() == 3, "dim of tensor should be 3 but {}".format(tensor.dim())
-        maxH = (~mask).sum(0).max()
-        maxW = (~mask).sum(1).max()
+        assert tensor.ndim == 3, f"dim of tensor should be 3 but {tensor.ndim}"
+        inv = ~mask
+        maxH = int(inv.sum(axis=0).max())
+        maxW = int(inv.sum(axis=1).max())
         img = tensor[:, :maxH, :maxW]
         return img
 
     def to_img_list(self):
-        """remove the padding and convert to img list
-
-        Returns:
-            [type]: [description]
-        """
-        if self.tensors.dim() == 3:
+        """Remove padding and convert to (a list of) CHW numpy arrays."""
+        if self.tensors.ndim == 3:
             return self.to_img_list_single(self.tensors, self.mask)
         else:
             res = []
@@ -458,7 +333,8 @@ class NestedTensor(object):
 
     @property
     def device(self):
-        return self.tensors.device
+        # Kept for API compatibility; underlying storage is numpy.
+        return "cpu"
 
     def decompose(self):
         return self.tensors, self.mask
@@ -471,98 +347,83 @@ class NestedTensor(object):
         return {"tensors.shape": self.tensors.shape, "mask.shape": self.mask.shape}
 
 
-def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
-    # TODO make this more general
-    if tensor_list[0].ndim == 3:
-        if torchvision._is_tracing():
-            # nested_tensor_from_tensor_list() does not export well to ONNX
-            # call _onnx_nested_tensor_from_tensor_list() instead
-            return _onnx_nested_tensor_from_tensor_list(tensor_list)
+def nested_tensor_from_tensor_list(tensor_list: List):
+    """
+    Build a NestedTensor from a list of CHW arrays / tensors.
 
-        # TODO make it support different-sized images
-        max_size = _max_by_axis([list(img.shape) for img in tensor_list])
-        # min_size = tuple(min(s) for s in zip(*[img.shape for img in tensor_list]))
-        batch_shape = [len(tensor_list)] + max_size
-        b, c, h, w = batch_shape
-        dtype = tensor_list[0].dtype
-        device = tensor_list[0].device
-        tensor = torch.zeros(batch_shape, dtype=dtype, device=device)
-        mask = torch.ones((b, h, w), dtype=torch.bool, device=device)
-        for img, pad_img, m in zip(tensor_list, tensor, mask):
-            pad_img[: img.shape[0], : img.shape[1], : img.shape[2]].copy_(img)
-            m[: img.shape[1], : img.shape[2]] = False
-    else:
-        raise ValueError("not supported")
-    return NestedTensor(tensor, mask)
+    Inputs can be:
+        - numpy arrays, or
+        - jt.Var with .numpy() method
+    """
+    if len(tensor_list) == 0:
+        raise ValueError("tensor_list must be non-empty")
 
-
-# _onnx_nested_tensor_from_tensor_list() is an implementation of
-# nested_tensor_from_tensor_list() that is supported by ONNX tracing.
-@torch.jit.unused
-def _onnx_nested_tensor_from_tensor_list(tensor_list: List[Tensor]) -> NestedTensor:
-    max_size = []
-    for i in range(tensor_list[0].dim()):
-        max_size_i = torch.max(
-            torch.stack([img.shape[i] for img in tensor_list]).to(torch.float32)
-        ).to(torch.int64)
-        max_size.append(max_size_i)
-    max_size = tuple(max_size)
-
-    # work around for
-    # pad_img[: img.shape[0], : img.shape[1], : img.shape[2]].copy_(img)
-    # m[: img.shape[1], :img.shape[2]] = False
-    # which is not yet supported in onnx
-    padded_imgs = []
-    padded_masks = []
+    # Convert everything to numpy arrays
+    np_list = []
     for img in tensor_list:
-        padding = [(s1 - s2) for s1, s2 in zip(max_size, tuple(img.shape))]
-        padded_img = torch.nn.functional.pad(img, (0, padding[2], 0, padding[1], 0, padding[0]))
-        padded_imgs.append(padded_img)
+        if isinstance(img, np.ndarray):
+            np_img = img
+        elif isinstance(img, jt.Var):
+            np_img = img.numpy()
+        else:
+            # fall back to numpy.asarray
+            np_img = np.asarray(img)
+        if np_img.ndim != 3:
+            raise ValueError(f"Expected 3D CHW array, got shape {np_img.shape}")
+        np_list.append(np_img)
 
-        m = torch.zeros_like(img[0], dtype=torch.int, device=img.device)
-        padded_mask = torch.nn.functional.pad(m, (0, padding[2], 0, padding[1]), "constant", 1)
-        padded_masks.append(padded_mask.to(torch.bool))
+    if np_list[0].ndim == 3:
+        max_size = _max_by_axis([list(img.shape) for img in np_list])  # [C, H, W]
+        batch_shape = [len(np_list)] + max_size
+        b, c, h, w = batch_shape
+        dtype = np_list[0].dtype
 
-    tensor = torch.stack(padded_imgs)
-    mask = torch.stack(padded_masks)
+        tensor = np.zeros(batch_shape, dtype=dtype)
+        mask = np.ones((b, h, w), dtype=bool)  # True = padding
 
-    return NestedTensor(tensor, mask=mask)
+        for i, (img, pad_img, m) in enumerate(zip(np_list, tensor, mask)):
+            c_i, h_i, w_i = img.shape
+            pad_img[:c_i, :h_i, :w_i] = img
+            m[:h_i, :w_i] = False  # False = valid
+    else:
+        raise ValueError("Only 3D CHW tensors are supported")
+
+    return NestedTensor(tensor, mask)
 
 
 def setup_for_distributed(is_master):
     """
-    This function disables printing when not in master process
+    This function disables printing when not in master process.
+    In the Jittor single-process port, this still works but is rarely used.
     """
     import builtins as __builtin__
 
     builtin_print = __builtin__.print
 
-    def print(*args, **kwargs):
+    def print_fn(*args, **kwargs):
         force = kwargs.pop("force", False)
         if is_master or force:
             builtin_print(*args, **kwargs)
 
-    __builtin__.print = print
+    __builtin__.print = print_fn
 
 
 def is_dist_avail_and_initialized():
-    if not dist.is_available():
-        return False
-    if not dist.is_initialized():
-        return False
-    return True
+    """
+    Check if distributed training is available and initialized.
+
+    Jittor port note:
+        We only support single-process mode here, so this always returns False.
+    """
+    return False
 
 
 def get_world_size():
-    if not is_dist_avail_and_initialized():
-        return 1
-    return dist.get_world_size()
+    return 1
 
 
 def get_rank():
-    if not is_dist_avail_and_initialized():
-        return 0
-    return dist.get_rank()
+    return 0
 
 
 def is_main_process():
@@ -570,118 +431,142 @@ def is_main_process():
 
 
 def save_on_master(*args, **kwargs):
+    """
+    Save checkpoint on main process.
+
+    Jittor port note:
+        For simplicity we disable checkpoint saving here. Keeping the
+        function for API compatibility.
+    """
     if is_main_process():
-        torch.save(*args, **kwargs)
+        # You can optionally plug in `jt.save` or `pickle.dump` here if needed.
+        pass
 
 
 def init_distributed_mode(args):
-    if "WORLD_SIZE" in os.environ and os.environ["WORLD_SIZE"] != "":  # 'RANK' in os.environ and
-        args.rank = int(os.environ["RANK"])
-        args.world_size = int(os.environ["WORLD_SIZE"])
-        args.gpu = args.local_rank = int(os.environ["LOCAL_RANK"])
+    """
+    Initialize distributed training.
 
-        # launch by torch.distributed.launch
-        # Single node
-        #   python -m torch.distributed.launch --nproc_per_node=8 main.py --world-size 1 --rank 0 ...
-        # Multi nodes
-        #   python -m torch.distributed.launch --nproc_per_node=8 main.py --world-size 2 --rank 0 --dist-url 'tcp://IP_OF_NODE0:FREEPORT' ...
-        #   python -m torch.distributed.launch --nproc_per_node=8 main.py --world-size 2 --rank 1 --dist-url 'tcp://IP_OF_NODE0:FREEPORT' ...
-        # args.rank = int(os.environ.get('OMPI_COMM_WORLD_RANK'))
-        # local_world_size = int(os.environ['GPU_PER_NODE_COUNT'])
-        # args.world_size = args.world_size * local_world_size
-        # args.gpu = args.local_rank = int(os.environ['LOCAL_RANK'])
-        # args.rank = args.rank * local_world_size + args.local_rank
-        print(
-            "world size: {}, rank: {}, local rank: {}".format(
-                args.world_size, args.rank, args.local_rank
-            )
-        )
-        print(json.dumps(dict(os.environ), indent=2))
-    elif "SLURM_PROCID" in os.environ:
-        args.rank = int(os.environ["SLURM_PROCID"])
-        args.gpu = args.local_rank = int(os.environ["SLURM_LOCALID"])
-        args.world_size = int(os.environ["SLURM_NPROCS"])
-
-        print(
-            "world size: {}, world rank: {}, local rank: {}, device_count: {}".format(
-                args.world_size, args.rank, args.local_rank, torch.cuda.device_count()
-            )
-        )
-    else:
-        print("Not using distributed mode")
-        args.distributed = False
-        args.world_size = 1
-        args.rank = 0
-        args.local_rank = 0
-        return
-
-    print("world_size:{} rank:{} local_rank:{}".format(args.world_size, args.rank, args.local_rank))
-    args.distributed = True
-    torch.cuda.set_device(args.local_rank)
-    args.dist_backend = "nccl"
-    print("| distributed init (rank {}): {}".format(args.rank, args.dist_url), flush=True)
-
-    torch.distributed.init_process_group(
-        backend=args.dist_backend,
-        world_size=args.world_size,
-        rank=args.rank,
-        init_method=args.dist_url,
-    )
-
-    print("Before torch.distributed.barrier()")
-    torch.distributed.barrier()
-    print("End torch.distributed.barrier()")
-    setup_for_distributed(args.rank == 0)
+    Jittor port note:
+        Distributed / multi-GPU training is not supported in this port.
+        We force single-process mode and set the relevant attributes on args.
+    """
+    print("Not using distributed mode (Jittor single-process port).")
+    args.distributed = False
+    args.world_size = 1
+    args.rank = 0
+    args.local_rank = 0
+    # keep these attributes for compatibility if other code accesses them
+    if not hasattr(args, "dist_backend"):
+        args.dist_backend = "nccl"
+    if not hasattr(args, "dist_url"):
+        args.dist_url = "env://"
+    # also ensure printing only from main process
+    setup_for_distributed(True)
 
 
-@torch.no_grad()
 def accuracy(output, target, topk=(1,)):
-    """Computes the precision@k for the specified values of k"""
-    if target.numel() == 0:
-        return [torch.zeros([], device=output.device)]
-    maxk = max(topk)
-    batch_size = target.size(0)
+    """
+    Computes the precision@k for the specified values of k.
 
-    _, pred = output.topk(maxk, 1, True, True)
-    pred = pred.t()
-    correct = pred.eq(target.view(1, -1).expand_as(pred))
+    Jittor port note:
+        Returns a list of jt.Var scalars to keep `.item()` semantics.
+    """
+    # Convert to numpy
+    if isinstance(output, jt.Var):
+        output_np = output.numpy()
+    else:
+        output_np = np.asarray(output)
+
+    if isinstance(target, jt.Var):
+        target_np = target.numpy()
+    else:
+        target_np = np.asarray(target)
+
+    if target_np.size == 0:
+        return [jt.float32([0.0]) for _ in topk]
+
+    # Ensure shape (N, C) for output and (N,) for target
+    if output_np.ndim != 2:
+        raise ValueError(f"accuracy expects output of shape (N, C), got {output_np.shape}")
+    target_np = target_np.reshape(-1)
+    batch_size = target_np.shape[0]
+    maxk = max(topk)
+
+    # top-k indices for each sample (descending scores)
+    # shape: (N, maxk)
+    topk_idx = np.argsort(-output_np, axis=1)[:, :maxk]
 
     res = []
     for k in topk:
-        correct_k = correct[:k].view(-1).float().sum(0)
-        res.append(correct_k.mul_(100.0 / batch_size))
+        pred_k = topk_idx[:, :k]  # (N, k)
+        correct = (pred_k == target_np[:, None])
+        correct_k = np.any(correct, axis=1).sum()
+        acc = float(correct_k) * 100.0 / float(batch_size)
+        # 返回 1 元素 Var，外面可以 .item()
+        res.append(jt.float32([acc]))
     return res
 
 
-@torch.no_grad()
 def accuracy_onehot(pred, gt):
-    """_summary_
+    """
+    Accuracy for one-hot predictions / labels.
 
     Args:
-        pred (_type_): n, c
-        gt (_type_): n, c
+        pred: array-like of shape (N, C)
+        gt:   array-like of shape (N, C)
+
+    Returns:
+        jt.Var scalar, percentage.
     """
-    tp = ((pred - gt).abs().sum(-1) < 1e-4).float().sum()
-    acc = tp / gt.shape[0] * 100
-    return acc
+    if isinstance(pred, jt.Var):
+        pred_np = pred.numpy()
+    else:
+        pred_np = np.asarray(pred)
+
+    if isinstance(gt, jt.Var):
+        gt_np = gt.numpy()
+    else:
+        gt_np = np.asarray(gt)
+
+    if pred_np.shape != gt_np.shape:
+        raise ValueError(f"pred and gt must have same shape, got {pred_np.shape} vs {gt_np.shape}")
+
+    # row-wise equality (up to small numerical tolerance)
+    matches = np.all(np.abs(pred_np - gt_np) < 1e-4, axis=-1)
+    tp = matches.sum()
+    acc = float(tp) * 100.0 / float(gt_np.shape[0])
+    return jt.float32([acc])
 
 
 def interpolate(input, size=None, scale_factor=None, mode="nearest", align_corners=None):
-    # type: (Tensor, Optional[List[int]], Optional[float], str, Optional[bool]) -> Tensor
     """
-    Equivalent to nn.functional.interpolate, but with support for empty batch sizes.
-    This will eventually be supported natively by PyTorch, and this
-    class can go away.
-    """
-    if __torchvision_need_compat_flag < 0.7:
-        if input.numel() > 0:
-            return torch.nn.functional.interpolate(input, size, scale_factor, mode, align_corners)
+    Wrapper around jittor.nn.interpolate with a PyTorch-like signature.
 
-        output_shape = _output_size(2, input, size, scale_factor)
-        output_shape = list(input.shape[:-2]) + list(output_shape)
-        return _new_empty_tensor(input, output_shape)
+    Args:
+        input: numpy array or jt.Var of shape (N, C, H, W) or (C, H, W)
+        size: output spatial size (H, W)
+        scale_factor: scale factor for H and W
+        mode: interpolation mode, e.g. 'nearest' or 'bilinear'
+        align_corners: forwarded to jittor.nn.interpolate for 'bilinear'
+    """
+    numpy_input = isinstance(input, np.ndarray)
+    if numpy_input:
+        x = jt.array(input)
     else:
-        return torchvision.ops.misc.interpolate(input, size, scale_factor, mode, align_corners)
+        x = input
+
+    out = nn.interpolate(
+        x,
+        size=size,
+        scale_factor=scale_factor,
+        mode=mode,
+        align_corners=align_corners,
+    )
+
+    if numpy_input:
+        return out.numpy()
+    return out
 
 
 class color_sys:
@@ -693,7 +578,7 @@ class color_sys:
             lightness = (50 + np.random.rand() * 10) / 100.0
             saturation = (90 + np.random.rand() * 10) / 100.0
             colors.append(
-                tuple([int(j * 255) for j in colorsys.hls_to_rgb(hue, lightness, saturation)])
+                tuple(int(j * 255) for j in colorsys.hls_to_rgb(hue, lightness, saturation))
             )
         self.colors = colors
 
@@ -702,10 +587,17 @@ class color_sys:
 
 
 def inverse_sigmoid(x, eps=1e-3):
-    x = x.clamp(min=0, max=1)
-    x1 = x.clamp(min=eps)
-    x2 = (1 - x).clamp(min=eps)
-    return torch.log(x1 / x2)
+    """
+    Numerically stable inverse of the sigmoid, working on Jittor Var or numpy array.
+    """
+    if isinstance(x, jt.Var):
+        # clamp into (eps, 1-eps)
+        x1 = jt.clamp(x, eps, 1.0 - eps)
+        return jt.log(x1 / (1.0 - x1))
+    else:
+        x_arr = np.asarray(x, dtype=np.float32)
+        x_arr = np.clip(x_arr, eps, 1.0 - eps)
+        return np.log(x_arr / (1.0 - x_arr))
 
 
 def clean_state_dict(state_dict):

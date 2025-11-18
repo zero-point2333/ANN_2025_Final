@@ -12,7 +12,7 @@ import os
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
+import jittor as jt
 from matplotlib import transforms
 from matplotlib.collections import PatchCollection
 from matplotlib.patches import Polygon
@@ -20,31 +20,38 @@ from pycocotools import mask as maskUtils
 
 
 def renorm(
-    img: torch.FloatTensor, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-) -> torch.FloatTensor:
-    # img: tensor(3,H,W) or tensor(B,3,H,W)
-    # return: same as img
-    assert img.dim() == 3 or img.dim() == 4, "img.dim() should be 3 or 4 but %d" % img.dim()
-    if img.dim() == 3:
-        assert img.size(0) == 3, 'img.size(0) shoule be 3 but "%d". (%s)' % (
-            img.size(0),
-            str(img.size()),
+    img, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+):
+    """
+    img: jt.Var with shape (3, H, W) or (B, 3, H, W)
+    return: jt.Var with the same shape as img
+    """
+    assert img.ndim == 3 or img.ndim == 4, "img.ndim should be 3 or 4 but %d" % img.ndim
+
+    mean_var = jt.float32(mean)
+    std_var = jt.float32(std)
+
+    if img.ndim == 3:
+        # (3, H, W) -> (H, W, 3)
+        assert img.shape[0] == 3, 'img.shape[0] should be 3 but "%d". (%s)' % (
+            img.shape[0],
+            str(img.shape),
         )
-        img_perm = img.permute(1, 2, 0)
-        mean = torch.Tensor(mean)
-        std = torch.Tensor(std)
-        img_res = img_perm * std + mean
-        return img_res.permute(2, 0, 1)
-    else:  # img.dim() == 4
-        assert img.size(1) == 3, 'img.size(1) shoule be 3 but "%d". (%s)' % (
-            img.size(1),
-            str(img.size()),
+        img_perm = img.transpose(1, 2, 0)
+        # broadcast along channel dimension
+        img_res = img_perm * std_var + mean_var
+        # (H, W, 3) -> (3, H, W)
+        return img_res.transpose(2, 0, 1)
+    else:
+        # (B, 3, H, W) -> (B, H, W, 3)
+        assert img.shape[1] == 3, 'img.shape[1] should be 3 but "%d". (%s)' % (
+            img.shape[1],
+            str(img.shape),
         )
-        img_perm = img.permute(0, 2, 3, 1)
-        mean = torch.Tensor(mean)
-        std = torch.Tensor(std)
-        img_res = img_perm * std + mean
-        return img_res.permute(0, 3, 1, 2)
+        img_perm = img.transpose(0, 2, 3, 1)
+        img_res = img_perm * std_var + mean_var
+        # (B, H, W, 3) -> (B, 3, H, W)
+        return img_res.transpose(0, 3, 1, 2)
 
 
 class ColorMap:
@@ -98,16 +105,19 @@ class COCOVisualizer:
 
     def visualize(self, img, tgt, caption=None, dpi=180, savedir="vis"):
         """
-        img: tensor(3, H, W)
-        tgt: make sure they are all on cpu.
+        img: jt.Var (3, H, W)
+        tgt: make sure they are all on cpu / numpy.
             must have items: 'image_id', 'boxes', 'size'
         """
         plt.figure(dpi=dpi)
         plt.rcParams["font.size"] = "5"
         ax = plt.gca()
-        img = renorm(img).permute(1, 2, 0)
-        # if os.environ.get('IPDB_SHILONG_DEBUG', None) == 'INFO':
-        #     import ipdb; ipdb.set_trace()
+
+        # 反标准化到 [0,1] / [0,255] 区间并转为 HWC
+        img = renorm(img).transpose(1, 2, 0)
+        # 显式转为 numpy
+        if hasattr(img, "data"):
+            img = img.data
         ax.imshow(img)
 
         self.addtgt(tgt)
@@ -133,27 +143,35 @@ class COCOVisualizer:
         plt.close()
 
     def addtgt(self, tgt):
-        """ """
-        if tgt is None or not "boxes" in tgt:
-            ax = plt.gca()
+        """Add detection targets (boxes, labels, attn) to current axes."""
 
-            if "caption" in tgt:
+        ax = plt.gca()
+
+        if tgt is None or "boxes" not in tgt:
+            if tgt is not None and "caption" in tgt:
                 ax.set_title(tgt["caption"], wrap=True)
-
             ax.set_axis_off()
             return
 
-        ax = plt.gca()
         H, W = tgt["size"]
-        numbox = tgt["boxes"].shape[0]
+
+        # 统一把 boxes 转成 numpy
+        boxes_src = tgt["boxes"]
+        if hasattr(boxes_src, "data"):
+            boxes_array = boxes_src.data
+        else:
+            boxes_array = np.array(boxes_src)
+
+        numbox = boxes_array.shape[0]
 
         color = []
         polygons = []
         boxes = []
-        for box in tgt["boxes"].cpu():
-            unnormbbox = box * torch.Tensor([W, H, W, H])
-            unnormbbox[:2] -= unnormbbox[2:] / 2
-            [bbox_x, bbox_y, bbox_w, bbox_h] = unnormbbox.tolist()
+        for box in boxes_array:
+            # 反归一化：cxcywh -> 绝对坐标
+            unnormbbox = box * np.array([W, H, W, H], dtype=np.float32)
+            unnormbbox[:2] -= unnormbbox[2:] / 2.0
+            bbox_x, bbox_y, bbox_w, bbox_h = unnormbbox.tolist()
             boxes.append([bbox_x, bbox_y, bbox_w, bbox_h])
             poly = [
                 [bbox_x, bbox_y],
@@ -166,6 +184,7 @@ class COCOVisualizer:
             c = (np.random.random((1, 3)) * 0.6 + 0.4).tolist()[0]
             color.append(c)
 
+        # 填充 + 边框
         p = PatchCollection(polygons, facecolor=color, linewidths=0, alpha=0.1)
         ax.add_collection(p)
         p = PatchCollection(polygons, facecolor="none", edgecolors=color, linewidths=2)
@@ -179,7 +198,6 @@ class COCOVisualizer:
                 cate_id = int(tgt["labels"][idx])
                 _string = str(cate_id) + ":" + " ".join(strlist)
                 bbox_x, bbox_y, bbox_w, bbox_h = boxes[idx]
-                # ax.text(bbox_x, bbox_y, _string, color='black', bbox={'facecolor': 'yellow', 'alpha': 1.0, 'pad': 1})
                 ax.text(
                     bbox_x,
                     bbox_y,
@@ -193,7 +211,6 @@ class COCOVisualizer:
             for idx, bl in enumerate(tgt["box_label"]):
                 _string = str(bl)
                 bbox_x, bbox_y, bbox_w, bbox_h = boxes[idx]
-                # ax.text(bbox_x, bbox_y, _string, color='black', bbox={'facecolor': 'yellow', 'alpha': 1.0, 'pad': 1})
                 ax.text(
                     bbox_x,
                     bbox_y,
@@ -204,13 +221,8 @@ class COCOVisualizer:
 
         if "caption" in tgt:
             ax.set_title(tgt["caption"], wrap=True)
-            # plt.figure()
-            # rainbow_text(0.0,0.0,"all unicorns poop rainbows ! ! !".split(),
-            #         ['red', 'orange', 'brown', 'green', 'blue', 'purple', 'black'])
 
         if "attn" in tgt:
-            # if os.environ.get('IPDB_SHILONG_DEBUG', None) == 'INFO':
-            #     import ipdb; ipdb.set_trace()
             if isinstance(tgt["attn"], tuple):
                 tgt["attn"] = [tgt["attn"]]
             for item in tgt["attn"]:
@@ -220,6 +232,7 @@ class COCOVisualizer:
                 cm = ColorMap(basergb)
                 heatmap = cm(attn_map)
                 ax.imshow(heatmap)
+
         ax.set_axis_off()
 
     def showAnns(self, anns, draw_bbox=False):

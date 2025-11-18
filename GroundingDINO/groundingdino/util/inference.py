@@ -1,18 +1,63 @@
-from typing import Tuple, List
+from typing import Tuple, List, Any
 
 import cv2
 import numpy as np
 import supervision as sv
-import torch
 from PIL import Image
-from torchvision.ops import box_convert
 import bisect
+import jittor as jt
 
 import groundingdino.datasets.transforms as T
 from groundingdino.models import build_model
 from groundingdino.util.misc import clean_state_dict
 from groundingdino.util.slconfig import SLConfig
 from groundingdino.util.utils import get_phrases_from_posmap
+
+
+def _set_jittor_device(device: str) -> None:
+    """
+    根据 device 字符串切换 Jittor 的 CUDA 开关。
+    保留原来 device 参数接口，但内部改用 jt.flags.use_cuda。
+    """
+    if device is None:
+        return
+    device = device.lower()
+    if device.startswith("cuda"):
+        jt.flags.use_cuda = 1
+    else:
+        jt.flags.use_cuda = 0
+
+
+def _to_numpy(x: Any) -> np.ndarray:
+    """
+    统一把 Jittor Var / 列表 / 元组 转成 numpy.ndarray，
+    """
+    if isinstance(x, np.ndarray):
+        return x
+    try:
+        if isinstance(x, jt.Var):
+            return x.numpy()
+    except Exception:
+        pass
+    return np.asarray(x)
+
+
+def _box_cxcywh_to_xyxy(boxes: np.ndarray) -> np.ndarray:
+    """
+    替代 torchvision.ops.box_convert，支持 cxcywh -> xyxy 的转换。
+    boxes: (..., 4) 格式 [cx, cy, w, h]
+    返回: (..., 4) 格式 [x0, y0, x1, y1]
+    """
+    x_c = boxes[..., 0]
+    y_c = boxes[..., 1]
+    w = boxes[..., 2]
+    h = boxes[..., 3]
+    x0 = x_c - 0.5 * w
+    y0 = y_c - 0.5 * h
+    x1 = x_c + 0.5 * w
+    y1 = y_c + 0.5 * h
+    return np.stack([x0, y0, x1, y1], axis=-1)
+
 
 # ----------------------------------------------------------------------------------------------------------------------
 # OLD API
@@ -27,16 +72,36 @@ def preprocess_caption(caption: str) -> str:
 
 
 def load_model(model_config_path: str, model_checkpoint_path: str, device: str = "cuda"):
+    _set_jittor_device(device)
+
     args = SLConfig.fromfile(model_config_path)
     args.device = device
+
     model = build_model(args)
-    checkpoint = torch.load(model_checkpoint_path, map_location="cpu")
-    model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
-    model.eval()
+
+    if model_checkpoint_path:
+        ckpt = jt.load(model_checkpoint_path)
+        if isinstance(ckpt, dict) and "model" in ckpt:
+            state_dict = ckpt["model"]
+        else:
+            state_dict = ckpt
+
+        state_dict = clean_state_dict(state_dict)
+
+        if hasattr(model, "load_state_dict"):
+            try:
+                model.load_state_dict(state_dict, strict=False)
+            except TypeError:
+                model.load_state_dict(state_dict)
+        elif hasattr(model, "load_parameters"):
+            model.load_parameters(state_dict)
+
+    if hasattr(model, "eval"):
+        model.eval()
     return model
 
 
-def load_image(image_path: str) -> Tuple[np.array, torch.Tensor]:
+def load_image(image_path: str) -> Tuple[np.ndarray, Any]:
     transform = T.Compose(
         [
             T.RandomResize([800], max_size=1333),
@@ -52,73 +117,88 @@ def load_image(image_path: str) -> Tuple[np.array, torch.Tensor]:
 
 def predict(
         model,
-        image: torch.Tensor,
+        image: Any,  # 原来是 torch.Tensor，这里放宽为 Any / Jittor Var
         caption: str,
         box_threshold: float,
         text_threshold: float,
         device: str = "cuda",
         remove_combined: bool = False
-) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
+) -> Tuple[Any, Any, List[str]]:
+    """
+    Jittor 版本的预测：
+    - 不再使用 torch.no_grad / .cpu() / .sigmoid()(.cpu())；
+    - 假定 model 和 image 都是 Jittor 风格的对象；
+    - 返回 boxes, scores, phrases 的接口保持不变。
+    """
     caption = preprocess_caption(caption=caption)
+    _set_jittor_device(device)
 
-    model = model.to(device)
-    image = image.to(device)
-
-    with torch.no_grad():
+    # 这里直接使用传入的 model 和 image
+    with jt.no_grad():
         outputs = model(image[None], captions=[caption])
 
-    prediction_logits = outputs["pred_logits"].cpu().sigmoid()[0]  # prediction_logits.shape = (nq, 256)
-    prediction_boxes = outputs["pred_boxes"].cpu()[0]  # prediction_boxes.shape = (nq, 4)
+    # outputs["pred_logits"]: (nq, vocab_dim)
+    # outputs["pred_boxes"]:  (nq, 4)
+    prediction_logits = outputs["pred_logits"].sigmoid()[0]
+    prediction_boxes = outputs["pred_boxes"][0]
 
-    mask = prediction_logits.max(dim=1)[0] > box_threshold
-    logits = prediction_logits[mask]  # logits.shape = (n, 256)
-    boxes = prediction_boxes[mask]  # boxes.shape = (n, 4)
+    # 按 query 取最大 logit 作为该 query 的 box score
+    max_per_query = prediction_logits.max(dim=1)[0]
+    mask = max_per_query > box_threshold
+
+    logits = prediction_logits[mask]          # (n, vocab_dim)
+    boxes = prediction_boxes[mask]            # (n, 4)
 
     tokenizer = model.tokenizer
     tokenized = tokenizer(caption)
-    
+
     if remove_combined:
-        sep_idx = [i for i in range(len(tokenized['input_ids'])) if tokenized['input_ids'][i] in [101, 102, 1012]]
-        
-        phrases = []
+        sep_idx = [
+            i for i in range(len(tokenized['input_ids']))
+            if tokenized['input_ids'][i] in [101, 102, 1012]
+        ]
+
+        phrases: List[str] = []
         for logit in logits:
-            max_idx = logit.argmax()
+            # logit: (vocab_dim,)
+            max_idx = int(logit.argmax())
             insert_idx = bisect.bisect_left(sep_idx, max_idx)
             right_idx = sep_idx[insert_idx]
             left_idx = sep_idx[insert_idx - 1]
-            phrases.append(get_phrases_from_posmap(logit > text_threshold, tokenized, tokenizer, left_idx, right_idx).replace('.', ''))
+            phrase = get_phrases_from_posmap(
+                logit > text_threshold,
+                tokenized,
+                tokenizer,
+                left_idx,
+                right_idx,
+            ).replace(".", "")
+            phrases.append(phrase)
     else:
         phrases = [
             get_phrases_from_posmap(logit > text_threshold, tokenized, tokenizer).replace('.', '')
-            for logit
-            in logits
+            for logit in logits
         ]
 
-    return boxes, logits.max(dim=1)[0], phrases
+    # 保持原返回结构： boxes, box_scores, phrases
+    box_scores = logits.max(dim=1)[0]
+    return boxes, box_scores, phrases
 
 
-def annotate(image_source: np.ndarray, boxes: torch.Tensor, logits: torch.Tensor, phrases: List[str]) -> np.ndarray:
-    """    
-    This function annotates an image with bounding boxes and labels.
-
-    Parameters:
-    image_source (np.ndarray): The source image to be annotated.
-    boxes (torch.Tensor): A tensor containing bounding box coordinates.
-    logits (torch.Tensor): A tensor containing confidence scores for each bounding box.
-    phrases (List[str]): A list of labels for each bounding box.
-
-    Returns:
-    np.ndarray: The annotated image.
-    """
+def annotate(image_source: np.ndarray, boxes: Any, logits: Any, phrases: List[str]) -> np.ndarray:
     h, w, _ = image_source.shape
-    boxes = boxes * torch.Tensor([w, h, w, h])
-    xyxy = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").numpy()
+
+    boxes_np = _to_numpy(boxes)
+    logits_np = _to_numpy(logits)
+
+    # 从归一化的 cxcywh 转到实际像素坐标 xyxy
+    boxes_scaled = boxes_np * np.array([w, h, w, h], dtype=np.float32)
+    xyxy = _box_cxcywh_to_xyxy(boxes_scaled)
+
     detections = sv.Detections(xyxy=xyxy)
 
     labels = [
-        f"{phrase} {logit:.2f}"
-        for phrase, logit
-        in zip(phrases, logits)
+        f"{phrase} {float(logit):.2f}"
+        for phrase, logit in zip(phrases, logits_np)
     ]
 
     bbox_annotator = sv.BoxAnnotator(color_lookup=sv.ColorLookup.INDEX)
@@ -142,11 +222,12 @@ class Model:
         model_checkpoint_path: str,
         device: str = "cuda"
     ):
+        # load_model 已经内部处理了 device，这里不再 .to(device)
         self.model = load_model(
             model_config_path=model_config_path,
             model_checkpoint_path=model_checkpoint_path,
             device=device
-        ).to(device)
+        )
         self.device = device
 
     def predict_with_caption(
@@ -174,20 +255,22 @@ class Model:
         box_annotator = sv.BoxAnnotator()
         annotated_image = box_annotator.annotate(scene=image, detections=detections, labels=labels)
         """
-        processed_image = Model.preprocess_image(image_bgr=image).to(self.device)
+        processed_image = Model.preprocess_image(image_bgr=image)
         boxes, logits, phrases = predict(
             model=self.model,
             image=processed_image,
             caption=caption,
             box_threshold=box_threshold,
-            text_threshold=text_threshold, 
-            device=self.device)
+            text_threshold=text_threshold,
+            device=self.device,
+        )
         source_h, source_w, _ = image.shape
         detections = Model.post_process_result(
             source_h=source_h,
             source_w=source_w,
             boxes=boxes,
-            logits=logits)
+            logits=logits,
+        )
         return detections, phrases
 
     def predict_with_classes(
@@ -210,33 +293,39 @@ class Model:
             text_threshold=TEXT_THRESHOLD
         )
 
-
         import supervision as sv
 
         box_annotator = sv.BoxAnnotator()
         annotated_image = box_annotator.annotate(scene=image, detections=detections)
         """
         caption = ". ".join(classes)
-        processed_image = Model.preprocess_image(image_bgr=image).to(self.device)
+        processed_image = Model.preprocess_image(image_bgr=image)
         boxes, logits, phrases = predict(
             model=self.model,
             image=processed_image,
             caption=caption,
             box_threshold=box_threshold,
             text_threshold=text_threshold,
-            device=self.device)
+            device=self.device,
+        )
         source_h, source_w, _ = image.shape
         detections = Model.post_process_result(
             source_h=source_h,
             source_w=source_w,
             boxes=boxes,
-            logits=logits)
+            logits=logits,
+        )
         class_id = Model.phrases2classes(phrases=phrases, classes=classes)
         detections.class_id = class_id
         return detections
 
     @staticmethod
-    def preprocess_image(image_bgr: np.ndarray) -> torch.Tensor:
+    def preprocess_image(image_bgr: np.ndarray) -> Any:
+        """
+        预处理保持原有 transforms.T 接口：
+        - image_bgr: OpenCV 读进来的 BGR 图像；
+        - 返回值交给 Jittor 版 T.ToTensor 决定类型。
+        """
         transform = T.Compose(
             [
                 T.RandomResize([800], max_size=1333),
@@ -252,12 +341,18 @@ class Model:
     def post_process_result(
             source_h: int,
             source_w: int,
-            boxes: torch.Tensor,
-            logits: torch.Tensor
+            boxes: Any,
+            logits: Any
     ) -> sv.Detections:
-        boxes = boxes * torch.Tensor([source_w, source_h, source_w, source_h])
-        xyxy = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").numpy()
-        confidence = logits.numpy()
+        """
+        把模型输出的 cxcywh 归一化框 + 置信度，转换为 supervision.Detections。
+        """
+        boxes_np = _to_numpy(boxes)
+        logits_np = _to_numpy(logits)
+
+        boxes_scaled = boxes_np * np.array([source_w, source_h, source_w, source_h], dtype=np.float32)
+        xyxy = _box_cxcywh_to_xyxy(boxes_scaled)
+        confidence = logits_np
         return sv.Detections(xyxy=xyxy, confidence=confidence)
 
     @staticmethod
