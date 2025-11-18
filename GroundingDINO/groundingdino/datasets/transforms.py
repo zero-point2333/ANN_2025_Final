@@ -15,7 +15,9 @@ from groundingdino.util.misc import interpolate
 
 
 def crop(image, target, region):
-    cropped_image = F.crop(image, *region)
+    # region: top, left, height, width
+    top, left, height, width = region
+    cropped_image = image.crop((left, top, left + width, top + height))
 
     target = target.copy()
     i, j, h, w = region
@@ -38,7 +40,9 @@ def crop(image, target, region):
 
     if "masks" in target:
         # FIXME should we update the area here if there are no boxes?
-        target["masks"] = target["masks"][:, i : i + h, j : j + w]
+        masks = target["masks"]
+        # masks assumed to be (N, H, W) and support slicing
+        target["masks"] = masks[:, i : i + h, j : j + w]
         fields.append("masks")
 
     # remove elements for which the boxes or masks that have zero area
@@ -49,7 +53,11 @@ def crop(image, target, region):
             cropped_boxes = target["boxes"].reshape(-1, 2, 2)
             keep = jt.all(cropped_boxes[:, 1, :] > cropped_boxes[:, 0, :], dim=1)
         else:
-            keep = target["masks"].flatten(1).any(1)
+            masks = target["masks"]
+            if isinstance(masks, jt.Var):
+                keep = masks.reshape(masks.shape[0], -1).any(1)
+            else:
+                keep = masks.reshape(masks.shape[0], -1).any(1)
 
         for field in fields:
             if field in target:
@@ -58,15 +66,17 @@ def crop(image, target, region):
     if os.environ.get("IPDB_SHILONG_DEBUG", None) == "INFO":
         # for debug and visualization only.
         if "strings_positive" in target:
-            target["strings_positive"] = [
-                _i for _i, _j in zip(target["strings_positive"], keep) if _j
-            ]
+            if isinstance(keep, jt.Var):
+                keep_np = keep.numpy().tolist()
+            else:
+                keep_np = list(keep)
+            target["strings_positive"] = [_i for _i, _j in zip(target["strings_positive"], keep_np) if _j]
 
     return cropped_image, target
 
 
 def hflip(image, target):
-    flipped_image = F.hflip(image)
+    flipped_image = image.transpose(Image.FLIP_LEFT_RIGHT)
 
     w, h = image.size
 
@@ -79,7 +89,11 @@ def hflip(image, target):
         target["boxes"] = boxes
 
     if "masks" in target:
-        target["masks"] = target["masks"].flip(-1)
+        masks = target["masks"]
+        if isinstance(masks, jt.Var):
+            target["masks"] = masks.flip(-1)
+        else:
+            target["masks"] = np.flip(masks, axis=-1).copy()
 
     return flipped_image, target
 
@@ -114,7 +128,8 @@ def resize(image, target, size, max_size=None):
             return get_size_with_aspect_ratio(image_size, size, max_size)
 
     size = get_size(image.size, size, max_size)
-    rescaled_image = F.resize(image, size)
+    # PIL expects (width, height)
+    rescaled_image = image.resize(size[::-1], resample=Image.BILINEAR)
 
     if target is None:
         return rescaled_image, None
@@ -132,6 +147,7 @@ def resize(image, target, size, max_size=None):
 
     if "area" in target:
         area = target["area"]
+        area = jt.array(area) if not isinstance(area, jt.Var) else area
         scaled_area = area * (ratio_width * ratio_height)
         target["area"] = scaled_area
 
@@ -139,16 +155,16 @@ def resize(image, target, size, max_size=None):
     target["size"] = jt.array([h, w])
 
     if "masks" in target:
-        target["masks"] = (
-            interpolate(target["masks"][:, None].float(), size, mode="nearest")[:, 0] > 0.5
-        )
+        masks = target["masks"]
+        # rely on project interpolate (which is already jittor-aware)
+        target["masks"] = (interpolate(masks[:, None].astype(jt.float32), size, mode="nearest")[:, 0] > 0.5)
 
     return rescaled_image, target
 
 
 def pad(image, target, padding):
     # assumes that we only pad on the bottom right corners
-    padded_image = F.pad(image, (0, 0, padding[0], padding[1]))
+    padded_image = ImageOps.expand(image, border=(0, 0, padding[0], padding[1]))
     if target is None:
         return padded_image, None
     target = target.copy()
