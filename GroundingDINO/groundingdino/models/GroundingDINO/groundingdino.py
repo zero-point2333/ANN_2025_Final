@@ -17,10 +17,8 @@
 import copy
 from typing import List
 
-import torch
-import torch.nn.functional as F
-from torch import nn
-from torchvision.ops.boxes import nms
+import jittor as jt
+import jittor.nn as nn
 from transformers import AutoTokenizer, BertModel, BertTokenizer, RobertaModel, RobertaTokenizerFast
 
 from groundingdino.util import box_ops, get_tokenlizer
@@ -77,8 +75,8 @@ class GroundingDINO(nn.Module):
     ):
         """Initializes the model.
         Parameters:
-            backbone: torch module of the backbone to be used. See backbone.py
-            transformer: torch module of the transformer architecture. See transformer.py
+            backbone: jt module of the backbone to be used. See backbone.py
+            transformer: jt module of the transformer architecture. See transformer.py
             num_queries: number of object queries, ie detection slot. This is the maximal number of objects
                          Conditional DETR can detect in a single image. For COCO, we recommend 100 queries.
             aux_loss: True if auxiliary decoding losses (loss at each decoder layer) are to be used.
@@ -106,13 +104,13 @@ class GroundingDINO(nn.Module):
         # bert
         self.tokenizer = get_tokenlizer.get_tokenlizer(text_encoder_type)
         self.bert = get_tokenlizer.get_pretrained_language_model(text_encoder_type)
-        self.bert.pooler.dense.weight.requires_grad_(False)
-        self.bert.pooler.dense.bias.requires_grad_(False)
+        self.bert.pooler.dense.weight.requires_grad = False
+        self.bert.pooler.dense.bias.requires_grad = False
         self.bert = BertModelWarper(bert_model=self.bert)
 
         self.feat_map = nn.Linear(self.bert.config.hidden_size, self.hidden_dim, bias=True)
-        nn.init.constant_(self.feat_map.bias.data, 0)
-        nn.init.xavier_uniform_(self.feat_map.weight.data)
+        nn.init.constant_(self.feat_map.bias, 0)
+        nn.init.xavier_uniform_(self.feat_map.weight)
         # freeze
 
         # special tokens
@@ -163,8 +161,8 @@ class GroundingDINO(nn.Module):
         _class_embed = ContrastiveEmbed()
 
         _bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
-        nn.init.constant_(_bbox_embed.layers[-1].weight.data, 0)
-        nn.init.constant_(_bbox_embed.layers[-1].bias.data, 0)
+        nn.init.constant_(_bbox_embed.layers[-1].weight, 0)
+        nn.init.constant_(_bbox_embed.layers[-1].bias, 0)
 
         if dec_pred_bbox_embed_share:
             box_embed_layerlist = [_bbox_embed for i in range(transformer.num_decoder_layers)]
@@ -207,7 +205,7 @@ class GroundingDINO(nn.Module):
             nn.init.constant_(proj[0].bias, 0)
 
     def set_image_tensor(self, samples: NestedTensor):
-        if isinstance(samples, (list, torch.Tensor)):
+        if isinstance(samples, (list, jt.Var)):
             samples = nested_tensor_from_tensor_list(samples)
         self.features, self.poss = self.backbone(samples)
 
@@ -224,7 +222,7 @@ class GroundingDINO(nn.Module):
     def init_ref_points(self, use_num_queries):
         self.refpoint_embed = nn.Embedding(use_num_queries, self.query_dim)
 
-    def forward(self, samples: NestedTensor, targets: List = None, **kw):
+    def execute(self, samples: NestedTensor, targets: List = None, **kw):
         """The forward expects a NestedTensor, which consists of:
            - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
            - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
@@ -297,7 +295,7 @@ class GroundingDINO(nn.Module):
         }
 
         # import ipdb; ipdb.set_trace()
-        if isinstance(samples, (list, torch.Tensor)):
+        if isinstance(samples, (list, jt.Var)):
             samples = nested_tensor_from_tensor_list(samples)
         if not hasattr(self, 'features') or not hasattr(self, 'poss'):
             self.set_image_tensor(samples)
@@ -317,7 +315,7 @@ class GroundingDINO(nn.Module):
                 else:
                     src = self.input_proj[l](srcs[-1])
                 m = samples.mask
-                mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
+                mask = nn.interpolate(m[None].float(), size=src.shape[-2:]).bool()[0]
                 pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype)
                 srcs.append(src)
                 masks.append(mask)
@@ -337,10 +335,10 @@ class GroundingDINO(nn.Module):
             layer_outputs_unsig = layer_delta_unsig + inverse_sigmoid(layer_ref_sig)
             layer_outputs_unsig = layer_outputs_unsig.sigmoid()
             outputs_coord_list.append(layer_outputs_unsig)
-        outputs_coord_list = torch.stack(outputs_coord_list)
+        outputs_coord_list = jt.stack(outputs_coord_list)
 
         # output
-        outputs_class = torch.stack(
+        outputs_class = jt.stack(
             [
                 layer_cls_embed(layer_hs, text_dict)
                 for layer_cls_embed, layer_hs in zip(self.class_embed, hs)
@@ -364,11 +362,11 @@ class GroundingDINO(nn.Module):
             self.unset_image_tensor() ## If necessary
         return out
 
-    @torch.jit.unused
+    @jt.no_grad()
     def _set_aux_loss(self, outputs_class, outputs_coord):
-        # this is a workaround to make torchscript happy, as torchscript
+        # this is a workaround to make jittor happy, as jittor
         # doesn't support dictionary with non-homogeneous values, such
-        # as a dict having both a Tensor and a list.
+        # as a dict having both a Var and a list.
         return [
             {"pred_logits": a, "pred_boxes": b}
             for a, b in zip(outputs_class[:-1], outputs_coord[:-1])
@@ -409,4 +407,3 @@ def build_groundingdino(args):
     )
 
     return model
-
