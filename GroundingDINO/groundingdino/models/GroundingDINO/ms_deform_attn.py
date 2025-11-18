@@ -18,12 +18,9 @@ import math
 import warnings
 from typing import Optional
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.autograd import Function
-from torch.autograd.function import once_differentiable
-from torch.nn.init import constant_, xavier_uniform_
+import jittor as jt
+import jittor.nn as nn
+from jittor import init
 
 try:
     from groundingdino import _C
@@ -38,9 +35,8 @@ def _is_power_of_2(n):
     return (n & (n - 1) == 0) and n != 0
 
 
-class MultiScaleDeformableAttnFunction(Function):
-    @staticmethod
-    def forward(
+class MultiScaleDeformableAttnFunction(jt.Function):
+    def execute(
         ctx,
         value,
         value_spatial_shapes,
@@ -67,9 +63,7 @@ class MultiScaleDeformableAttnFunction(Function):
         )
         return output
 
-    @staticmethod
-    @once_differentiable
-    def backward(ctx, grad_output):
+    def grad(ctx, grad_output):
         (
             value,
             value_spatial_shapes,
@@ -91,11 +85,11 @@ class MultiScaleDeformableAttnFunction(Function):
 
 
 def multi_scale_deformable_attn_pytorch(
-    value: torch.Tensor,
-    value_spatial_shapes: torch.Tensor,
-    sampling_locations: torch.Tensor,
-    attention_weights: torch.Tensor,
-) -> torch.Tensor:
+    value: jt.Var,
+    value_spatial_shapes: jt.Var,
+    sampling_locations: jt.Var,
+    attention_weights: jt.Var,
+) -> jt.Var:
 
     bs, _, num_heads, embed_dims = value.shape
     _, num_queries, num_heads, num_levels, num_points, _ = sampling_locations.shape
@@ -115,7 +109,7 @@ def multi_scale_deformable_attn_pytorch(
         # bs*num_heads, num_queries, num_points, 2
         sampling_grid_l_ = sampling_grids[:, :, :, level].transpose(1, 2).flatten(0, 1)
         # bs*num_heads, embed_dims, num_queries, num_points
-        sampling_value_l_ = F.grid_sample(
+        sampling_value_l_ = nn.grid_sample(
             value_l_, sampling_grid_l_, mode="bilinear", padding_mode="zeros", align_corners=False
         )
         sampling_value_list.append(sampling_value_l_)
@@ -126,11 +120,11 @@ def multi_scale_deformable_attn_pytorch(
         bs * num_heads, 1, num_queries, num_levels * num_points
     )
     output = (
-        (torch.stack(sampling_value_list, dim=-2).flatten(-2) * attention_weights)
+        (jt.stack(sampling_value_list, dim=-2).flatten(-2) * attention_weights)
         .sum(-1)
         .view(bs, num_heads * embed_dims, num_queries)
     )
-    return output.transpose(1, 2).contiguous()
+    return output.transpose(1, 2)
 
 
 class MultiScaleDeformableAttention(nn.Module):
@@ -198,26 +192,26 @@ class MultiScaleDeformableAttention(nn.Module):
         """
         Default initialization for Parameters of Module.
         """
-        constant_(self.sampling_offsets.weight.data, 0.0)
-        thetas = torch.arange(self.num_heads, dtype=torch.float32) * (
+        init.constant_(self.sampling_offsets.weight, 0.0)
+        thetas = jt.arange(self.num_heads, dtype=jt.float32) * (
             2.0 * math.pi / self.num_heads
         )
-        grid_init = torch.stack([thetas.cos(), thetas.sin()], -1)
+        grid_init = jt.stack([thetas.cos(), thetas.sin()], -1)
         grid_init = (
-            (grid_init / grid_init.abs().max(-1, keepdim=True)[0])
+            (grid_init / grid_init.abs().max(-1, keepdims=True)[0])
             .view(self.num_heads, 1, 1, 2)
             .repeat(1, self.num_levels, self.num_points, 1)
         )
         for i in range(self.num_points):
             grid_init[:, :, i, :] *= i + 1
-        with torch.no_grad():
-            self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
-        constant_(self.attention_weights.weight.data, 0.0)
-        constant_(self.attention_weights.bias.data, 0.0)
-        xavier_uniform_(self.value_proj.weight.data)
-        constant_(self.value_proj.bias.data, 0.0)
-        xavier_uniform_(self.output_proj.weight.data)
-        constant_(self.output_proj.bias.data, 0.0)
+        
+        self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
+        init.constant_(self.attention_weights.weight, 0.0)
+        init.constant_(self.attention_weights.bias, 0.0)
+        init.xavier_uniform_(self.value_proj.weight)
+        init.constant_(self.value_proj.bias, 0.0)
+        init.xavier_uniform_(self.output_proj.weight)
+        init.constant_(self.output_proj.bias, 0.0)
 
     def freeze_sampling_offsets(self):
         print("Freeze sampling offsets")
@@ -229,45 +223,45 @@ class MultiScaleDeformableAttention(nn.Module):
         self.attention_weights.weight.requires_grad = False
         self.attention_weights.bias.requires_grad = False
 
-    def forward(
+    def execute(
         self,
-        query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-        value: Optional[torch.Tensor] = None,
-        query_pos: Optional[torch.Tensor] = None,
-        key_padding_mask: Optional[torch.Tensor] = None,
-        reference_points: Optional[torch.Tensor] = None,
-        spatial_shapes: Optional[torch.Tensor] = None,
-        level_start_index: Optional[torch.Tensor] = None,
+        query: jt.Var,
+        key: Optional[jt.Var] = None,
+        value: Optional[jt.Var] = None,
+        query_pos: Optional[jt.Var] = None,
+        key_padding_mask: Optional[jt.Var] = None,
+        reference_points: Optional[jt.Var] = None,
+        spatial_shapes: Optional[jt.Var] = None,
+        level_start_index: Optional[jt.Var] = None,
         **kwargs
-    ) -> torch.Tensor:
+    ) -> jt.Var:
 
         """Forward Function of MultiScaleDeformableAttention
 
         Args:
-            query (torch.Tensor): Query embeddings with shape
+            query (jt.Var): Query embeddings with shape
                 `(num_query, bs, embed_dim)`
-            key (torch.Tensor): Key embeddings with shape
+            key (jt.Var): Key embeddings with shape
                 `(num_key, bs, embed_dim)`
-            value (torch.Tensor): Value embeddings with shape
+            value (jt.Var): Value embeddings with shape
                 `(num_key, bs, embed_dim)`
-            query_pos (torch.Tensor): The position embedding for `query`. Default: None.
-            key_padding_mask (torch.Tensor): ByteTensor for `query`, with shape `(bs, num_key)`,
+            query_pos (jt.Var): The position embedding for `query`. Default: None.
+            key_padding_mask (jt.Var): ByteVar for `query`, with shape `(bs, num_key)`,
                 indicating which elements within `key` to be ignored in attention.
-            reference_points (torch.Tensor): The normalized reference points
+            reference_points (jt.Var): The normalized reference points
                 with shape `(bs, num_query, num_levels, 2)`,
                 all elements is range in [0, 1], top-left (0, 0),
                 bottom-right (1, 1), including padding are.
                 or `(N, Length_{query}, num_levels, 4)`, add additional
                 two dimensions `(h, w)` to form reference boxes.
-            spatial_shapes (torch.Tensor): Spatial shape of features in different levels.
+            spatial_shapes (jt.Var): Spatial shape of features in different levels.
                 With shape `(num_levels, 2)`, last dimension represents `(h, w)`.
-            level_start_index (torch.Tensor): The start index of each level. A tensor with
+            level_start_index (jt.Var): The start index of each level. A tensor with
                 shape `(num_levels, )` which can be represented as
                 `[0, h_0 * w_0, h_0 * w_0 + h_1 * w_1, ...]`.
 
         Returns:
-            torch.Tensor: forward results with shape `(num_query, bs, embed_dim)`
+            jt.Var: forward results with shape `(num_query, bs, embed_dim)`
         """
 
         if value is None:
@@ -296,7 +290,7 @@ class MultiScaleDeformableAttention(nn.Module):
         attention_weights = self.attention_weights(query).view(
             bs, num_query, self.num_heads, self.num_levels * self.num_points
         )
-        attention_weights = attention_weights.softmax(-1)
+        attention_weights = nn.softmax(attention_weights, dim=-1)
         attention_weights = attention_weights.view(
             bs,
             num_query,
@@ -307,7 +301,7 @@ class MultiScaleDeformableAttention(nn.Module):
 
         # bs, num_query, num_heads, num_levels, num_points, 2
         if reference_points.shape[-1] == 2:
-            offset_normalizer = torch.stack([spatial_shapes[..., 1], spatial_shapes[..., 0]], -1)
+            offset_normalizer = jt.stack([spatial_shapes[..., 1], spatial_shapes[..., 0]], -1)
             sampling_locations = (
                 reference_points[:, :, None, :, None, :]
                 + sampling_offsets / offset_normalizer[None, None, None, :, None, :]
@@ -327,9 +321,9 @@ class MultiScaleDeformableAttention(nn.Module):
                 )
             )
     
-        if torch.cuda.is_available() and value.is_cuda:
+        if jt.has_cuda and value.is_cuda:
             halffloat = False
-            if value.dtype == torch.float16:
+            if value.dtype == jt.float16:
                 halffloat = True
                 value = value.float()
                 sampling_locations = sampling_locations.float()

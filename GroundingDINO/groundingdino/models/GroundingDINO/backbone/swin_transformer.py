@@ -12,11 +12,10 @@
 # --------------------------------------------------------
 
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.utils.checkpoint as checkpoint
-from timm.models.layers import DropPath, to_2tuple, trunc_normal_
+import jittor as jt
+import jittor.nn as nn
+import jittor.nn as F
+from jittor import checkpoint
 
 from groundingdino.util.misc import NestedTensor
 
@@ -35,7 +34,7 @@ class Mlp(nn.Module):
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
 
-    def forward(self, x):
+    def execute(self, x):
         x = self.fc1(x)
         x = self.act(x)
         x = self.drop(x)
@@ -107,14 +106,14 @@ class WindowAttention(nn.Module):
 
         # define a parameter table of relative position bias
         self.relative_position_bias_table = nn.Parameter(
-            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads)
+            jt.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads)
         )  # 2*Wh-1 * 2*Ww-1, nH
 
         # get pair-wise relative position index for each token inside the window
-        coords_h = torch.arange(self.window_size[0])
-        coords_w = torch.arange(self.window_size[1])
-        coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
-        coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
+        coords_h = jt.arange(self.window_size[0])
+        coords_w = jt.arange(self.window_size[1])
+        coords = jt.stack(jt.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
+        coords_flatten = jt.flatten(coords, 1)  # 2, Wh*Ww
         relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
         relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
         relative_coords[:, :, 0] += self.window_size[0] - 1  # shift to start from 0
@@ -128,10 +127,11 @@ class WindowAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-        trunc_normal_(self.relative_position_bias_table, std=0.02)
+        # Jittor中没有trunc_normal_，使用自定义初始化
+        nn.init.gauss_(self.relative_position_bias_table, 0, 0.02)
         self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, x, mask=None):
+    def execute(self, x, mask=None):
         """Forward function.
         Args:
             x: input features with shape of (num_windows*B, N, C)
@@ -143,7 +143,7 @@ class WindowAttention(nn.Module):
             .reshape(B_, N, 3, self.num_heads, C // self.num_heads)
             .permute(2, 0, 3, 1, 4)
         )
-        q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # make jittor happy (cannot use tensor as tuple)
 
         q = q * self.scale
         attn = q @ k.transpose(-2, -1)
@@ -225,7 +225,8 @@ class SwinTransformerBlock(nn.Module):
             proj_drop=drop,
         )
 
-        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        # Jittor中没有DropPath，使用Identity代替
+        self.drop_path = nn.Identity() if drop_path <= 0.0 else nn.Dropout(drop_path)
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(
@@ -235,7 +236,7 @@ class SwinTransformerBlock(nn.Module):
         self.H = None
         self.W = None
 
-    def forward(self, x, mask_matrix):
+    def execute(self, x, mask_matrix):
         """Forward function.
         Args:
             x: Input feature, tensor size (B, H*W, C).
@@ -259,7 +260,7 @@ class SwinTransformerBlock(nn.Module):
 
         # cyclic shift
         if self.shift_size > 0:
-            shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
+            shifted_x = jt.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
             attn_mask = mask_matrix
         else:
             shifted_x = x
@@ -282,7 +283,7 @@ class SwinTransformerBlock(nn.Module):
 
         # reverse cyclic shift
         if self.shift_size > 0:
-            x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
+            x = jt.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
         else:
             x = shifted_x
 
@@ -311,7 +312,7 @@ class PatchMerging(nn.Module):
         self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
         self.norm = norm_layer(4 * dim)
 
-    def forward(self, x, H, W):
+    def execute(self, x, H, W):
         """Forward function.
         Args:
             x: Input feature, tensor size (B, H*W, C).
@@ -331,7 +332,7 @@ class PatchMerging(nn.Module):
         x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 C
         x2 = x[:, 0::2, 1::2, :]  # B H/2 W/2 C
         x3 = x[:, 1::2, 1::2, :]  # B H/2 W/2 C
-        x = torch.cat([x0, x1, x2, x3], -1)  # B H/2 W/2 4*C
+        x = jt.concat([x0, x1, x2, x3], -1)  # B H/2 W/2 4*C
         x = x.view(B, -1, 4 * C)  # B H/2*W/2 4*C
 
         x = self.norm(x)
@@ -406,7 +407,7 @@ class BasicLayer(nn.Module):
         else:
             self.downsample = None
 
-    def forward(self, x, H, W):
+    def execute(self, x, H, W):
         """Forward function.
         Args:
             x: Input feature, tensor size (B, H*W, C).
@@ -416,7 +417,7 @@ class BasicLayer(nn.Module):
         # calculate attention mask for SW-MSA
         Hp = int(np.ceil(H / self.window_size)) * self.window_size
         Wp = int(np.ceil(W / self.window_size)) * self.window_size
-        img_mask = torch.zeros((1, Hp, Wp, 1), device=x.device)  # 1 Hp Wp 1
+        img_mask = jt.zeros((1, Hp, Wp, 1))  # 1 Hp Wp 1
         h_slices = (
             slice(0, -self.window_size),
             slice(-self.window_size, -self.shift_size),
@@ -445,7 +446,7 @@ class BasicLayer(nn.Module):
         for blk in self.blocks:
             blk.H, blk.W = H, W
             if self.use_checkpoint:
-                x = checkpoint.checkpoint(blk, x, attn_mask)
+                x = checkpoint(blk, x, attn_mask)
             else:
                 x = blk(x, attn_mask)
         if self.downsample is not None:
@@ -479,10 +480,10 @@ class PatchEmbed(nn.Module):
         else:
             self.norm = None
 
-    def forward(self, x):
+    def execute(self, x):
         """Forward function."""
         # padding
-        _, _, H, W = x.size()
+        _, _, H, W = x.shape
         if W % self.patch_size[1] != 0:
             x = F.pad(x, (0, self.patch_size[1] - W % self.patch_size[1]))
         if H % self.patch_size[0] != 0:
@@ -490,7 +491,7 @@ class PatchEmbed(nn.Module):
 
         x = self.proj(x)  # B C Wh Ww
         if self.norm is not None:
-            Wh, Ww = x.size(2), x.size(3)
+            Wh, Ww = x.shape[2], x.shape[3]
             x = x.flatten(2).transpose(1, 2)
             x = self.norm(x)
             x = x.transpose(1, 2).view(-1, self.embed_dim, Wh, Ww)
@@ -582,15 +583,16 @@ class SwinTransformer(nn.Module):
             ]
 
             self.absolute_pos_embed = nn.Parameter(
-                torch.zeros(1, embed_dim, patches_resolution[0], patches_resolution[1])
+                jt.zeros(1, embed_dim, patches_resolution[0], patches_resolution[1])
             )
-            trunc_normal_(self.absolute_pos_embed, std=0.02)
+            # Jittor中没有trunc_normal_，使用高斯初始化
+            nn.init.gauss_(self.absolute_pos_embed, 0, 0.02)
 
         self.pos_drop = nn.Dropout(p=drop_rate)
 
         # stochastic depth
         dpr = [
-            x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))
+            x.item() for x in jt.linspace(0, drop_path_rate, sum(depths))
         ]  # stochastic depth decay rule
 
         # build layers
@@ -637,10 +639,10 @@ class SwinTransformer(nn.Module):
         if self.frozen_stages >= 0:
             self.patch_embed.eval()
             for param in self.patch_embed.parameters():
-                param.requires_grad = False
+                param.stop_grad()
 
         if self.frozen_stages >= 1 and self.ape:
-            self.absolute_pos_embed.requires_grad = False
+            self.absolute_pos_embed.stop_grad = False
 
         if self.frozen_stages >= 2:
             self.pos_drop.eval()
@@ -648,38 +650,13 @@ class SwinTransformer(nn.Module):
                 m = self.layers[i]
                 m.eval()
                 for param in m.parameters():
-                    param.requires_grad = False
+                    param.stop_grad()
 
-    # def init_weights(self, pretrained=None):
-    #     """Initialize the weights in backbone.
-    #     Args:
-    #         pretrained (str, optional): Path to pre-trained weights.
-    #             Defaults to None.
-    #     """
-
-    #     def _init_weights(m):
-    #         if isinstance(m, nn.Linear):
-    #             trunc_normal_(m.weight, std=.02)
-    #             if isinstance(m, nn.Linear) and m.bias is not None:
-    #                 nn.init.constant_(m.bias, 0)
-    #         elif isinstance(m, nn.LayerNorm):
-    #             nn.init.constant_(m.bias, 0)
-    #             nn.init.constant_(m.weight, 1.0)
-
-    #     if isinstance(pretrained, str):
-    #         self.apply(_init_weights)
-    #         logger = get_root_logger()
-    #         load_checkpoint(self, pretrained, strict=False, logger=logger)
-    #     elif pretrained is None:
-    #         self.apply(_init_weights)
-    #     else:
-    #         raise TypeError('pretrained must be a str or None')
-
-    def forward_raw(self, x):
+    def execute_raw(self, x):
         """Forward function."""
         x = self.patch_embed(x)
 
-        Wh, Ww = x.size(2), x.size(3)
+        Wh, Ww = x.shape[2], x.shape[3]
         if self.ape:
             # interpolate the position embedding to the corresponding size
             absolute_pos_embed = F.interpolate(
@@ -703,19 +680,19 @@ class SwinTransformer(nn.Module):
                 out = x_out.view(-1, H, W, self.num_features[i]).permute(0, 3, 1, 2).contiguous()
                 outs.append(out)
         # in:
-        #   torch.Size([2, 3, 1024, 1024])
+        #   jt.Var([2, 3, 1024, 1024])
         # outs:
-        #   [torch.Size([2, 192, 256, 256]), torch.Size([2, 384, 128, 128]), \
-        #       torch.Size([2, 768, 64, 64]), torch.Size([2, 1536, 32, 32])]
+        #   [jt.Var([2, 192, 256, 256]), jt.Var([2, 384, 128, 128]), \
+        #       jt.Var([2, 768, 64, 64]), jt.Var([2, 1536, 32, 32])]
         return tuple(outs)
 
-    def forward(self, tensor_list: NestedTensor):
+    def execute(self, tensor_list: NestedTensor):
         x = tensor_list.tensors
 
         """Forward function."""
         x = self.patch_embed(x)
 
-        Wh, Ww = x.size(2), x.size(3)
+        Wh, Ww = x.shape[2], x.shape[3]
         if self.ape:
             # interpolate the position embedding to the corresponding size
             absolute_pos_embed = F.interpolate(
@@ -738,17 +715,17 @@ class SwinTransformer(nn.Module):
                 out = x_out.view(-1, H, W, self.num_features[i]).permute(0, 3, 1, 2).contiguous()
                 outs.append(out)
         # in:
-        #   torch.Size([2, 3, 1024, 1024])
+        #   jt.Var([2, 3, 1024, 1024])
         # out:
-        #   [torch.Size([2, 192, 256, 256]), torch.Size([2, 384, 128, 128]), \
-        #       torch.Size([2, 768, 64, 64]), torch.Size([2, 1536, 32, 32])]
+        #   [jt.Var([2, 192, 256, 256]), jt.Var([2, 384, 128, 128]), \
+        #       jt.Var([2, 768, 64, 64]), jt.Var([2, 1536, 32, 32])]
 
         # collect for nesttensors
         outs_dict = {}
         for idx, out_i in enumerate(outs):
             m = tensor_list.mask
             assert m is not None
-            mask = F.interpolate(m[None].float(), size=out_i.shape[-2:]).to(torch.bool)[0]
+            mask = F.interpolate(m[None].float(), size=out_i.shape[-2:]).to(jt.bool)[0]
             outs_dict[idx] = NestedTensor(out_i, mask)
 
         return outs_dict
@@ -791,12 +768,21 @@ def build_swin_transformer(modelname, pretrain_img_size, **kw):
     return model
 
 
+def to_2tuple(x):
+    if isinstance(x, (list, tuple)):
+        if len(x) == 2:
+            return x
+        else:
+            raise ValueError(f"Length of x should be 2, but got {len(x)}")
+    return (x, x)
+
+
 if __name__ == "__main__":
     model = build_swin_transformer("swin_L_384_22k", 384, dilation=True)
-    x = torch.rand(2, 3, 1024, 1024)
-    y = model.forward_raw(x)
+    x = jt.rand(2, 3, 1024, 1024)
+    y = model.execute_raw(x)
     import ipdb
 
     ipdb.set_trace()
-    x = torch.rand(2, 3, 384, 384)
-    y = model.forward_raw(x)
+    x = jt.rand(2, 3, 384, 384)
+    y = model.execute_raw(x)

@@ -5,11 +5,9 @@
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
 
-import torch
-import torch.nn.functional as F
-import torch.utils.checkpoint as checkpoint
-from torch import Tensor, nn
-from torchvision.ops.boxes import nms
+import jittor as jt
+import jittor.nn as F
+from jittor import nn
 from transformers import BertConfig, BertModel, BertPreTrainedModel
 from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
 
@@ -28,7 +26,7 @@ class BertModelWarper(nn.Module):
         self.invert_attention_mask = bert_model.invert_attention_mask
         self.get_head_mask = bert_model.get_head_mask
 
-    def forward(
+    def execute(
         self,
         input_ids=None,
         attention_mask=None,
@@ -45,16 +43,16 @@ class BertModelWarper(nn.Module):
         return_dict=None,
     ):
         r"""
-        encoder_hidden_states  (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, hidden_size)`, `optional`):
+        encoder_hidden_states  (:obj:`jt.Var` of shape :obj:`(batch_size, sequence_length, hidden_size)`, `optional`):
             Sequence of hidden-states at the output of the last layer of the encoder. Used in the cross-attention if
             the model is configured as a decoder.
-        encoder_attention_mask (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+        encoder_attention_mask (:obj:`jt.Var` of shape :obj:`(batch_size, sequence_length)`, `optional`):
             Mask to avoid performing attention on the padding token indices of the encoder input. This mask is used in
             the cross-attention if the model is configured as a decoder. Mask values selected in ``[0, 1]``:
 
             - 1 for tokens that are **not masked**,
             - 0 for tokens that are **masked**.
-        past_key_values (:obj:`tuple(tuple(torch.FloatTensor))` of length :obj:`config.n_layers` with each tuple having 4 tensors of shape :obj:`(batch_size, num_heads, sequence_length - 1, embed_size_per_head)`):
+        past_key_values (:obj:`tuple(tuple(jt.Var))` of length :obj:`config.n_layers` with each tuple having 4 tensors of shape :obj:`(batch_size, num_heads, sequence_length - 1, embed_size_per_head)`):
             Contains precomputed key and value hidden states of the attention blocks. Can be used to speed up decoding.
 
             If :obj:`past_key_values` are used, the user can optionally input only the last :obj:`decoder_input_ids`
@@ -82,10 +80,10 @@ class BertModelWarper(nn.Module):
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
         elif input_ids is not None:
-            input_shape = input_ids.size()
+            input_shape = input_ids.shape
             batch_size, seq_length = input_shape
         elif inputs_embeds is not None:
-            input_shape = inputs_embeds.size()[:-1]
+            input_shape = inputs_embeds.shape[:-1]
             batch_size, seq_length = input_shape
         else:
             raise ValueError("You have to specify either input_ids or inputs_embeds")
@@ -98,25 +96,25 @@ class BertModelWarper(nn.Module):
         )
 
         if attention_mask is None:
-            attention_mask = torch.ones(
-                ((batch_size, seq_length + past_key_values_length)), device=device
+            attention_mask = jt.ones(
+                (batch_size, seq_length + past_key_values_length), device=device
             )
         if token_type_ids is None:
-            token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=device)
+            token_type_ids = jt.zeros(input_shape, dtype=jt.long, device=device)
 
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
-        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(
+        extended_attention_mask = self.get_extended_attention_mask(
             attention_mask, input_shape, device
         )
 
         # If a 2D or 3D attention mask is provided for the cross-attention
         # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
         if self.config.is_decoder and encoder_hidden_states is not None:
-            encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
+            encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.shape
             encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
             if encoder_attention_mask is None:
-                encoder_attention_mask = torch.ones(encoder_hidden_shape, device=device)
+                encoder_attention_mask = jt.ones(encoder_hidden_shape, device=device)
             encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)
         else:
             encoder_extended_attention_mask = None
@@ -172,7 +170,7 @@ class TextEncoderShell(nn.Module):
         self.text_encoder = text_encoder
         self.config = self.text_encoder.config
 
-    def forward(self, **kw):
+    def execute(self, **kw):
         # feed into text encoder
         return self.text_encoder(**kw)
 
@@ -180,26 +178,26 @@ class TextEncoderShell(nn.Module):
 def generate_masks_with_special_tokens(tokenized, special_tokens_list, tokenizer):
     """Generate attention mask between each pair of special tokens
     Args:
-        input_ids (torch.Tensor): input ids. Shape: [bs, num_token]
+        input_ids (jt.Var): input ids. Shape: [bs, num_token]
         special_tokens_mask (list): special tokens mask.
     Returns:
-        torch.Tensor: attention mask between each special tokens.
+        jt.Var: attention mask between each special tokens.
     """
     input_ids = tokenized["input_ids"]
     bs, num_token = input_ids.shape
     # special_tokens_mask: bs, num_token. 1 for special tokens. 0 for normal tokens
-    special_tokens_mask = torch.zeros((bs, num_token), device=input_ids.device).bool()
+    special_tokens_mask = jt.zeros((bs, num_token), device=input_ids.device).bool()
     for special_token in special_tokens_list:
         special_tokens_mask |= input_ids == special_token
 
     # idxs: each row is a list of indices of special tokens
-    idxs = torch.nonzero(special_tokens_mask)
+    idxs = jt.nonzero(special_tokens_mask)
 
     # generate attention mask and positional ids
     attention_mask = (
-        torch.eye(num_token, device=input_ids.device).bool().unsqueeze(0).repeat(bs, 1, 1)
+        jt.eye(num_token, device=input_ids.device).bool().unsqueeze(0).repeat(bs, 1, 1)
     )
-    position_ids = torch.zeros((bs, num_token), device=input_ids.device)
+    position_ids = jt.zeros((bs, num_token), device=input_ids.device)
     previous_col = 0
     for i in range(idxs.shape[0]):
         row, col = idxs[i]
@@ -208,7 +206,7 @@ def generate_masks_with_special_tokens(tokenized, special_tokens_list, tokenizer
             position_ids[row, col] = 0
         else:
             attention_mask[row, previous_col + 1 : col + 1, previous_col + 1 : col + 1] = True
-            position_ids[row, previous_col + 1 : col + 1] = torch.arange(
+            position_ids[row, previous_col + 1 : col + 1] = jt.arange(
                 0, col - previous_col, device=input_ids.device
             )
 
@@ -218,32 +216,32 @@ def generate_masks_with_special_tokens(tokenized, special_tokens_list, tokenizer
     # padding_mask = tokenized['attention_mask']
     # attention_mask = attention_mask & padding_mask.unsqueeze(1).bool() & padding_mask.unsqueeze(2).bool()
 
-    return attention_mask, position_ids.to(torch.long)
+    return attention_mask, position_ids.int()
 
 
 def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_tokens_list, tokenizer):
     """Generate attention mask between each pair of special tokens
     Args:
-        input_ids (torch.Tensor): input ids. Shape: [bs, num_token]
+        input_ids (jt.Var): input ids. Shape: [bs, num_token]
         special_tokens_mask (list): special tokens mask.
     Returns:
-        torch.Tensor: attention mask between each special tokens.
+        jt.Var: attention mask between each special tokens.
     """
     input_ids = tokenized["input_ids"]
     bs, num_token = input_ids.shape
     # special_tokens_mask: bs, num_token. 1 for special tokens. 0 for normal tokens
-    special_tokens_mask = torch.zeros((bs, num_token), device=input_ids.device).bool()
+    special_tokens_mask = jt.zeros((bs, num_token), device=input_ids.device).bool()
     for special_token in special_tokens_list:
         special_tokens_mask |= input_ids == special_token
 
     # idxs: each row is a list of indices of special tokens
-    idxs = torch.nonzero(special_tokens_mask)
+    idxs = jt.nonzero(special_tokens_mask)
 
     # generate attention mask and positional ids
     attention_mask = (
-        torch.eye(num_token, device=input_ids.device).bool().unsqueeze(0).repeat(bs, 1, 1)
+        jt.eye(num_token, device=input_ids.device).bool().unsqueeze(0).repeat(bs, 1, 1)
     )
-    position_ids = torch.zeros((bs, num_token), device=input_ids.device)
+    position_ids = jt.zeros((bs, num_token), device=input_ids.device)
     cate_to_token_mask_list = [[] for _ in range(bs)]
     previous_col = 0
     for i in range(idxs.shape[0]):
@@ -253,16 +251,16 @@ def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_token
             position_ids[row, col] = 0
         else:
             attention_mask[row, previous_col + 1 : col + 1, previous_col + 1 : col + 1] = True
-            position_ids[row, previous_col + 1 : col + 1] = torch.arange(
+            position_ids[row, previous_col + 1 : col + 1] = jt.arange(
                 0, col - previous_col, device=input_ids.device
             )
-            c2t_maski = torch.zeros((num_token), device=input_ids.device).bool()
+            c2t_maski = jt.zeros((num_token), device=input_ids.device).bool()
             c2t_maski[previous_col + 1 : col] = True
             cate_to_token_mask_list[row].append(c2t_maski)
         previous_col = col
 
     cate_to_token_mask_list = [
-        torch.stack(cate_to_token_mask_listi, dim=0)
+        jt.stack(cate_to_token_mask_listi, dim=0)
         for cate_to_token_mask_listi in cate_to_token_mask_list
     ]
 
@@ -270,4 +268,4 @@ def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_token
     # padding_mask = tokenized['attention_mask']
     # attention_mask = attention_mask & padding_mask.unsqueeze(1).bool() & padding_mask.unsqueeze(2).bool()
 
-    return attention_mask, position_ids.to(torch.long), cate_to_token_mask_list
+    return attention_mask, position_ids.int(), cate_to_token_mask_list

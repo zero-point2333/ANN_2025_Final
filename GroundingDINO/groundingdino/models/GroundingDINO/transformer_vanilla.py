@@ -16,9 +16,10 @@ Copy-paste from torch.nn.Transformer with modifications:
 """
 from typing import Optional
 
-import torch
-import torch.nn.functional as F
-from torch import Tensor, nn
+import jittor as jt
+import jittor.nn as nn
+from jittor import Var
+
 
 from .utils import (
     MLP,
@@ -44,7 +45,7 @@ class TextTransformer(nn.Module):
         )
         self.layers = _get_clones(single_encoder_layer, num_layers)
 
-    def forward(self, memory_text: torch.Tensor, text_attention_mask: torch.Tensor):
+    def execute(self, memory_text: jt.Var, text_attention_mask: jt.Var):
         """
 
         Args:
@@ -95,18 +96,18 @@ class TransformerEncoderLayer(nn.Module):
         self.normalize_before = normalize_before
         self.nhead = nhead
 
-    def with_pos_embed(self, tensor, pos: Optional[Tensor]):
+    def with_pos_embed(self, tensor, pos: Optional[jt.Var]):
         return tensor if pos is None else tensor + pos
 
-    def forward(
+    def execute(
         self,
         src,
-        src_mask: Optional[Tensor] = None,
-        src_key_padding_mask: Optional[Tensor] = None,
-        pos: Optional[Tensor] = None,
+        src_mask: Optional[jt.Var] = None,
+        src_key_padding_mask: Optional[jt.Var] = None,
+        pos: Optional[jt.Var] = None,
     ):
         # repeat attn mask
-        if src_mask.dim() == 3 and src_mask.shape[0] == src.shape[1]:
+        if src_mask is not None and src_mask.dim() == 3 and src_mask.shape[0] == src.shape[1]:
             # bs, num_q, num_k
             src_mask = src_mask.repeat(self.nhead, 1, 1)
 

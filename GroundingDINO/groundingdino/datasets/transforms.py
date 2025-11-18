@@ -6,54 +6,9 @@ import os
 import random
 
 import PIL
-from PIL import Image, ImageOps
-import numpy as np
 import jittor as jt
-
-
-def get_random_crop_params(img, output_size):
-    """Return parameters (top, left, height, width) for a random crop.
-
-    `output_size` may be an int or a sequence (height, width).
-    """
-    if isinstance(output_size, (list, tuple)):
-        th, tw = output_size
-    else:
-        th = tw = output_size
-    w, h = img.size
-    if w == tw and h == th:
-        return 0, 0, h, w
-    i = random.randint(0, h - th)
-    j = random.randint(0, w - tw)
-    return i, j, th, tw
-
-
-def to_jt_tensor(pic):
-    """Convert a PIL Image or numpy array to a jittor CHW float tensor in [0,1]."""
-    if isinstance(pic, PIL.Image.Image):
-        arr = np.array(pic)
-    else:
-        arr = np.asarray(pic)
-    if arr.ndim == 2:
-        # grayscale H,W -> 1,H,W
-        arr = np.expand_dims(arr, axis=2)
-    # arr is H,W,C -> transpose to C,H,W
-    if arr.shape[2] <= 4 and arr.shape[0] >= 1 and arr.shape[0] != arr.shape[2]:
-        arr = arr.transpose(2, 0, 1)
-    arr = arr.astype(np.float32) / 255.0
-    return jt.array(arr)
-
-
-def normalize_tensor(image, mean, std):
-    """Normalize a tensor (jittor Var or numpy array) by mean/std per channel.
-
-    Expects input in CHW format.
-    """
-    if not isinstance(image, jt.Var):
-        image = to_jt_tensor(image)
-    mean_arr = jt.array(mean, dtype=jt.float32).reshape(-1, 1, 1)
-    std_arr = jt.array(std, dtype=jt.float32).reshape(-1, 1, 1)
-    return (image - mean_arr) / std_arr
+import jittor.transform as T
+import jittor.transform.functional as F
 
 from groundingdino.util.box_ops import box_xyxy_to_cxcywh
 from groundingdino.util.misc import interpolate
@@ -68,19 +23,17 @@ def crop(image, target, region):
     i, j, h, w = region
 
     # should we do something wrt the original size?
-    target["size"] = jt.array([h, w], dtype=jt.float32)
+    target["size"] = jt.array([h, w])
 
     fields = ["labels", "area", "iscrowd", "positive_map"]
 
     if "boxes" in target:
         boxes = target["boxes"]
-        boxes = jt.array(boxes) if not isinstance(boxes, jt.Var) else boxes
         max_size = jt.array([w, h], dtype=jt.float32)
-        cropped_boxes = boxes - jt.array([j, i, j, i], dtype=jt.float32)
+        cropped_boxes = boxes - jt.array([j, i, j, i])
         cropped_boxes = jt.minimum(cropped_boxes.reshape(-1, 2, 2), max_size)
-        cropped_boxes = jt.maximum(cropped_boxes, 0)
-        diff = cropped_boxes[:, 1, :] - cropped_boxes[:, 0, :]
-        area = diff[:, 0] * diff[:, 1]
+        cropped_boxes = cropped_boxes.maximum(0)
+        area = (cropped_boxes[:, 1, :] - cropped_boxes[:, 0, :]).prod(dim=1)
         target["boxes"] = cropped_boxes.reshape(-1, 4)
         target["area"] = area
         fields.append("boxes")
@@ -98,9 +51,7 @@ def crop(image, target, region):
         # this is compatible with previous implementation
         if "boxes" in target:
             cropped_boxes = target["boxes"].reshape(-1, 2, 2)
-            if not isinstance(cropped_boxes, jt.Var):
-                cropped_boxes = jt.array(cropped_boxes)
-            keep = (cropped_boxes[:, 1, :] > cropped_boxes[:, 0, :]).all(1)
+            keep = jt.all(cropped_boxes[:, 1, :] > cropped_boxes[:, 0, :], dim=1)
         else:
             masks = target["masks"]
             if isinstance(masks, jt.Var):
@@ -132,8 +83,9 @@ def hflip(image, target):
     target = target.copy()
     if "boxes" in target:
         boxes = target["boxes"]
-        boxes = jt.array(boxes) if not isinstance(boxes, jt.Var) else boxes
-        boxes = boxes[:, [2, 1, 0, 3]] * jt.array([-1, 1, -1, 1], dtype=jt.float32) + jt.array([w, 0, w, 0], dtype=jt.float32)
+        boxes = boxes[:, [2, 1, 0, 3]] * jt.array([-1, 1, -1, 1]) + jt.array(
+            [w, 0, w, 0]
+        )
         target["boxes"] = boxes
 
     if "masks" in target:
@@ -188,8 +140,9 @@ def resize(image, target, size, max_size=None):
     target = target.copy()
     if "boxes" in target:
         boxes = target["boxes"]
-        boxes = jt.array(boxes) if not isinstance(boxes, jt.Var) else boxes
-        scaled_boxes = boxes * jt.array([ratio_width, ratio_height, ratio_width, ratio_height], dtype=jt.float32)
+        scaled_boxes = boxes * jt.array(
+            [ratio_width, ratio_height, ratio_width, ratio_height]
+        )
         target["boxes"] = scaled_boxes
 
     if "area" in target:
@@ -199,7 +152,7 @@ def resize(image, target, size, max_size=None):
         target["area"] = scaled_area
 
     h, w = size
-    target["size"] = jt.array([h, w], dtype=jt.float32)
+    target["size"] = jt.array([h, w])
 
     if "masks" in target:
         masks = target["masks"]
@@ -216,16 +169,9 @@ def pad(image, target, padding):
         return padded_image, None
     target = target.copy()
     # should we do something wrt the original size?
-    target["size"] = jt.array(padded_image.size[::-1], dtype=jt.float32)
+    target["size"] = jt.array(padded_image.size[::-1])
     if "masks" in target:
-        masks = target["masks"]
-        # masks shape (N, H, W)
-        if isinstance(masks, jt.Var):
-            masks_np = masks.numpy()
-            padded = np.pad(masks_np, ((0, 0), (0, padding[1]), (0, padding[0])), mode="constant")
-            target["masks"] = jt.array(padded)
-        else:
-            target["masks"] = np.pad(masks, ((0, 0), (0, padding[1]), (0, padding[0])), mode="constant")
+        target["masks"] = jt.nn.pad(target["masks"], (0, padding[0], 0, padding[1]))
     return padded_image, target
 
 
@@ -242,7 +188,21 @@ class RandomCrop(object):
         self.size = size
 
     def __call__(self, img, target):
-        region = get_random_crop_params(img, self.size)
+        # Jittor 的 RandomCrop 参数获取方式
+        if isinstance(img, PIL.Image.Image):
+            w, h = img.size
+        else:
+            h, w = img.shape[-2], img.shape[-1]
+        
+        crop_h, crop_w = self.size
+        if crop_h > h or crop_w > w:
+            # 如果裁剪尺寸大于图像尺寸，使用较小的尺寸
+            crop_h = min(crop_h, h)
+            crop_w = min(crop_w, w)
+        
+        i = random.randint(0, h - crop_h)
+        j = random.randint(0, w - crop_w)
+        region = (i, j, crop_h, crop_w)
         return crop(img, target, region)
 
 
@@ -260,7 +220,12 @@ class RandomSizeCrop(object):
         for i in range(max_patience):
             w = random.randint(self.min_size, min(img.width, self.max_size))
             h = random.randint(self.min_size, min(img.height, self.max_size))
-            region = get_random_crop_params(img, [h, w])
+            
+            # 手动实现随机裁剪区域选择
+            i = random.randint(0, img.height - h) if img.height > h else 0
+            j = random.randint(0, img.width - w) if img.width > w else 0
+            region = (i, j, h, w)
+            
             result_img, result_target = crop(img, target, region)
             if (
                 not self.respect_boxes
@@ -276,7 +241,11 @@ class CenterCrop(object):
         self.size = size
 
     def __call__(self, img, target):
-        image_width, image_height = img.size
+        if isinstance(img, PIL.Image.Image):
+            image_width, image_height = img.size
+        else:
+            image_height, image_width = img.shape[-2], img.shape[-1]
+            
         crop_height, crop_width = self.size
         crop_top = int(round((image_height - crop_height) / 2.0))
         crop_left = int(round((image_width - crop_width) / 2.0))
@@ -333,64 +302,21 @@ class RandomSelect(object):
 
 class ToTensor(object):
     def __call__(self, img, target):
-        return to_jt_tensor(img), target
+        # Jittor 的 to_tensor 会自动处理 PIL Image
+        if isinstance(img, PIL.Image.Image):
+            img = F.to_tensor(img)
+        return img, target
 
 
 class RandomErasing(object):
     def __init__(self, *args, **kwargs):
-        # implement a simple RandomErasing compatible with tensors or PIL images
-        self.args = args
-        self.kwargs = kwargs
+        # Jittor 目前没有 RandomErasing，可以手动实现或使用其他增强方法
+        # 这里先保持空实现，需要时再补充
+        pass
 
     def __call__(self, img, target):
-        # support PIL Image, numpy array (H,W,C) or jt.Var (C,H,W)
-        if isinstance(img, PIL.Image.Image):
-            arr = np.array(img).copy()
-            h, w = arr.shape[0], arr.shape[1]
-            area = h * w
-            for _ in range(1):
-                Se = random.uniform(0.02, 0.4) * area
-                re = random.uniform(0.3, 3.3)
-                He = int(round(np.sqrt(Se * re)))
-                We = int(round(np.sqrt(Se / re)))
-                if He < h and We < w:
-                    xe = random.randint(0, h - He)
-                    ye = random.randint(0, w - We)
-                    arr[xe : xe + He, ye : ye + We, :] = 0
-                    break
-            return PIL.Image.fromarray(arr), target
-        else:
-            # assume tensor-like
-            if isinstance(img, jt.Var):
-                arr = img.numpy()
-                is_jt = True
-            else:
-                arr = np.array(img)
-                is_jt = False
-            # handle CHW
-            if arr.ndim == 3 and arr.shape[0] <= 4:
-                # CHW -> HWC
-                arr = arr.transpose(1, 2, 0)
-            h, w = arr.shape[0], arr.shape[1]
-            area = h * w
-            for _ in range(1):
-                Se = random.uniform(0.02, 0.4) * area
-                re = random.uniform(0.3, 3.3)
-                He = int(round(np.sqrt(Se * re)))
-                We = int(round(np.sqrt(Se / re)))
-                if He < h and We < w:
-                    xe = random.randint(0, h - He)
-                    ye = random.randint(0, w - We)
-                    arr[xe : xe + He, ye : ye + We, :] = 0
-                    break
-            if is_jt:
-                # back to CHW
-                arr = arr.transpose(2, 0, 1)
-                return jt.array(arr), target
-            else:
-                if arr.shape[2] <= 4:
-                    arr = arr.transpose(2, 0, 1)
-                return arr, target
+        # TODO: 实现 Jittor 版本的 RandomErasing
+        return img, target
 
 
 class Normalize(object):
@@ -399,15 +325,23 @@ class Normalize(object):
         self.std = std
 
     def __call__(self, image, target=None):
-        image = normalize_tensor(image, mean=self.mean, std=self.std)
+        # Jittor 的 normalize 需要确保输入是 jt.Var
+        if isinstance(image, PIL.Image.Image):
+            image = F.to_tensor(image)
+        
+        image = F.normalize(image, mean=self.mean, std=self.std)
         if target is None:
             return image, None
         target = target.copy()
-        h, w = image.shape[-2:]
+        
+        if isinstance(image, jt.Var):
+            h, w = image.shape[-2:]
+        else:
+            h, w = image.shape[-2:]
+            
         if "boxes" in target:
             boxes = target["boxes"]
             boxes = box_xyxy_to_cxcywh(boxes)
-            boxes = jt.array(boxes) if not isinstance(boxes, jt.Var) else boxes
             boxes = boxes / jt.array([w, h, w, h], dtype=jt.float32)
             target["boxes"] = boxes
         return image, target

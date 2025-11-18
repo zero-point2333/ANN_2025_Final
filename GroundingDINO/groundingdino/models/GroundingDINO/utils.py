@@ -8,13 +8,12 @@
 import copy
 import math
 
-import torch
-import torch.nn.functional as F
-from torch import Tensor, nn
+import jittor as jt
+import jittor.nn as nn
+from jittor import Var
 
 
 def _get_clones(module, N, layer_share=False):
-    # import ipdb; ipdb.set_trace()
     if layer_share:
         return nn.ModuleList([module for i in range(N)])
     else:
@@ -22,39 +21,39 @@ def _get_clones(module, N, layer_share=False):
 
 
 def get_sine_pos_embed(
-    pos_tensor: torch.Tensor,
+    pos_tensor: jt.Var,
     num_pos_feats: int = 128,
     temperature: int = 10000,
     exchange_xy: bool = True,
 ):
     """generate sine position embedding from a position tensor
     Args:
-        pos_tensor (torch.Tensor): shape: [..., n].
+        pos_tensor (jt.Var): shape: [..., n].
         num_pos_feats (int): projected shape for each float in the tensor.
         temperature (int): temperature in the sine/cosine function.
         exchange_xy (bool, optional): exchange pos x and pos y. \
             For example, input tensor is [x,y], the results will be [pos(y), pos(x)]. Defaults to True.
     Returns:
-        pos_embed (torch.Tensor): shape: [..., n*num_pos_feats].
+        pos_embed (jt.Var): shape: [..., n*num_pos_feats].
     """
     scale = 2 * math.pi
-    dim_t = torch.arange(num_pos_feats, dtype=torch.float32, device=pos_tensor.device)
-    dim_t = temperature ** (2 * torch.div(dim_t, 2, rounding_mode="floor") / num_pos_feats)
+    dim_t = jt.arange(num_pos_feats, dtype=jt.float32, device=pos_tensor.device)
+    dim_t = temperature ** (2 * (dim_t // 2) / num_pos_feats)
 
-    def sine_func(x: torch.Tensor):
+    def sine_func(x: jt.Var):
         sin_x = x * scale / dim_t
-        sin_x = torch.stack((sin_x[..., 0::2].sin(), sin_x[..., 1::2].cos()), dim=3).flatten(2)
+        sin_x = jt.stack((sin_x[..., 0::2].sin(), sin_x[..., 1::2].cos()), dim=3).flatten(2)
         return sin_x
 
     pos_res = [sine_func(x) for x in pos_tensor.split([1] * pos_tensor.shape[-1], dim=-1)]
     if exchange_xy:
         pos_res[0], pos_res[1] = pos_res[1], pos_res[0]
-    pos_res = torch.cat(pos_res, dim=-1)
+    pos_res = jt.concat(pos_res, dim=-1)
     return pos_res
 
 
 def gen_encoder_output_proposals(
-    memory: Tensor, memory_padding_mask: Tensor, spatial_shapes: Tensor, learnedwh=None
+    memory: Var, memory_padding_mask: Var, spatial_shapes: Var, learnedwh=None
 ):
     """
     Input:
@@ -71,47 +70,38 @@ def gen_encoder_output_proposals(
     _cur = 0
     for lvl, (H_, W_) in enumerate(spatial_shapes):
         mask_flatten_ = memory_padding_mask[:, _cur : (_cur + H_ * W_)].view(N_, H_, W_, 1)
-        valid_H = torch.sum(~mask_flatten_[:, :, 0, 0], 1)
-        valid_W = torch.sum(~mask_flatten_[:, 0, :, 0], 1)
+        valid_H = jt.sum(~mask_flatten_[:, :, 0, 0], 1)
+        valid_W = jt.sum(~mask_flatten_[:, 0, :, 0], 1)
 
-        # import ipdb; ipdb.set_trace()
-
-        grid_y, grid_x = torch.meshgrid(
-            torch.linspace(0, H_ - 1, H_, dtype=torch.float32, device=memory.device),
-            torch.linspace(0, W_ - 1, W_, dtype=torch.float32, device=memory.device),
+        grid_y, grid_x = jt.meshgrid(
+            jt.linspace(0, H_ - 1, H_, dtype=jt.float32, device=memory.device),
+            jt.linspace(0, W_ - 1, W_, dtype=jt.float32, device=memory.device),
         )
-        grid = torch.cat([grid_x.unsqueeze(-1), grid_y.unsqueeze(-1)], -1)  # H_, W_, 2
+        grid = jt.concat([grid_x.unsqueeze(-1), grid_y.unsqueeze(-1)], -1)  # H_, W_, 2
 
-        scale = torch.cat([valid_W.unsqueeze(-1), valid_H.unsqueeze(-1)], 1).view(N_, 1, 1, 2)
+        scale = jt.concat([valid_W.unsqueeze(-1), valid_H.unsqueeze(-1)], 1).view(N_, 1, 1, 2)
         grid = (grid.unsqueeze(0).expand(N_, -1, -1, -1) + 0.5) / scale
 
         if learnedwh is not None:
-            # import ipdb; ipdb.set_trace()
-            wh = torch.ones_like(grid) * learnedwh.sigmoid() * (2.0**lvl)
+            wh = jt.ones_like(grid) * learnedwh.sigmoid() * (2.0**lvl)
         else:
-            wh = torch.ones_like(grid) * 0.05 * (2.0**lvl)
+            wh = jt.ones_like(grid) * 0.05 * (2.0**lvl)
 
-        # scale = torch.cat([W_[None].unsqueeze(-1), H_[None].unsqueeze(-1)], 1).view(1, 1, 1, 2).repeat(N_, 1, 1, 1)
-        # grid = (grid.unsqueeze(0).expand(N_, -1, -1, -1) + 0.5) / scale
-        # wh = torch.ones_like(grid) / scale
-        proposal = torch.cat((grid, wh), -1).view(N_, -1, 4)
+        proposal = jt.concat((grid, wh), -1).view(N_, -1, 4)
         proposals.append(proposal)
         _cur += H_ * W_
-    # import ipdb; ipdb.set_trace()
-    output_proposals = torch.cat(proposals, 1)
+
+    output_proposals = jt.concat(proposals, 1)
     output_proposals_valid = ((output_proposals > 0.01) & (output_proposals < 0.99)).all(
-        -1, keepdim=True
+        -1, keepdims=True
     )
-    output_proposals = torch.log(output_proposals / (1 - output_proposals))  # unsigmoid
+    output_proposals = jt.log(output_proposals / (1 - output_proposals))  # unsigmoid
     output_proposals = output_proposals.masked_fill(memory_padding_mask.unsqueeze(-1), float("inf"))
     output_proposals = output_proposals.masked_fill(~output_proposals_valid, float("inf"))
 
     output_memory = memory
     output_memory = output_memory.masked_fill(memory_padding_mask.unsqueeze(-1), float(0))
     output_memory = output_memory.masked_fill(~output_proposals_valid, float(0))
-
-    # output_memory = output_memory.masked_fill(memory_padding_mask.unsqueeze(-1), float('inf'))
-    # output_memory = output_memory.masked_fill(~output_proposals_valid, float('inf'))
 
     return output_memory, output_proposals
 
@@ -120,19 +110,17 @@ class RandomBoxPerturber:
     def __init__(
         self, x_noise_scale=0.2, y_noise_scale=0.2, w_noise_scale=0.2, h_noise_scale=0.2
     ) -> None:
-        self.noise_scale = torch.Tensor(
-            [x_noise_scale, y_noise_scale, w_noise_scale, h_noise_scale]
-        )
+        self.noise_scale = jt.array([x_noise_scale, y_noise_scale, w_noise_scale, h_noise_scale])
 
-    def __call__(self, refanchors: Tensor) -> Tensor:
+    def __call__(self, refanchors: Var) -> Var:
         nq, bs, query_dim = refanchors.shape
         device = refanchors.device
 
-        noise_raw = torch.rand_like(refanchors)
+        noise_raw = jt.rand(refanchors.shape)
         noise_scale = self.noise_scale.to(device)[:query_dim]
 
         new_refanchors = refanchors * (1 + (noise_raw - 0.5) * noise_scale)
-        return new_refanchors.clamp_(0, 1)
+        return new_refanchors.clamp(0, 1)
 
 
 def sigmoid_focal_loss(
@@ -154,7 +142,7 @@ def sigmoid_focal_loss(
         Loss tensor
     """
     prob = inputs.sigmoid()
-    ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+    ce_loss = nn.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
     p_t = prob * targets + (1 - prob) * (1 - targets)
     loss = ce_loss * ((1 - p_t) ** gamma)
 
@@ -179,54 +167,52 @@ class MLP(nn.Module):
             nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim])
         )
 
-    def forward(self, x):
+    def execute(self, x):
         for i, layer in enumerate(self.layers):
-            x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
+            x = nn.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
         return x
 
 
 def _get_activation_fn(activation, d_model=256, batch_dim=0):
     """Return an activation function given a string"""
     if activation == "relu":
-        return F.relu
+        return nn.relu
     if activation == "gelu":
-        return F.gelu
+        return nn.gelu
     if activation == "glu":
-        return F.glu
+        return nn.glu
     if activation == "prelu":
         return nn.PReLU()
     if activation == "selu":
-        return F.selu
+        return nn.selu
 
     raise RuntimeError(f"activation should be relu/gelu, not {activation}.")
 
 
 def gen_sineembed_for_position(pos_tensor):
-    # n_query, bs, _ = pos_tensor.size()
-    # sineembed_tensor = torch.zeros(n_query, bs, 256)
     scale = 2 * math.pi
-    dim_t = torch.arange(128, dtype=torch.float32, device=pos_tensor.device)
-    dim_t = 10000 ** (2 * (torch.div(dim_t, 2, rounding_mode='floor')) / 128)
+    dim_t = jt.arange(128, dtype=jt.float32, device=pos_tensor.device)
+    dim_t = 10000 ** (2 * (dim_t // 2) / 128)
     x_embed = pos_tensor[:, :, 0] * scale
     y_embed = pos_tensor[:, :, 1] * scale
     pos_x = x_embed[:, :, None] / dim_t
     pos_y = y_embed[:, :, None] / dim_t
-    pos_x = torch.stack((pos_x[:, :, 0::2].sin(), pos_x[:, :, 1::2].cos()), dim=3).flatten(2)
-    pos_y = torch.stack((pos_y[:, :, 0::2].sin(), pos_y[:, :, 1::2].cos()), dim=3).flatten(2)
-    if pos_tensor.size(-1) == 2:
-        pos = torch.cat((pos_y, pos_x), dim=2)
-    elif pos_tensor.size(-1) == 4:
+    pos_x = jt.stack((pos_x[:, :, 0::2].sin(), pos_x[:, :, 1::2].cos()), dim=3).flatten(2)
+    pos_y = jt.stack((pos_y[:, :, 0::2].sin(), pos_y[:, :, 1::2].cos()), dim=3).flatten(2)
+    if pos_tensor.shape[-1] == 2:
+        pos = jt.concat((pos_y, pos_x), dim=2)
+    elif pos_tensor.shape[-1] == 4:
         w_embed = pos_tensor[:, :, 2] * scale
         pos_w = w_embed[:, :, None] / dim_t
-        pos_w = torch.stack((pos_w[:, :, 0::2].sin(), pos_w[:, :, 1::2].cos()), dim=3).flatten(2)
+        pos_w = jt.stack((pos_w[:, :, 0::2].sin(), pos_w[:, :, 1::2].cos()), dim=3).flatten(2)
 
         h_embed = pos_tensor[:, :, 3] * scale
         pos_h = h_embed[:, :, None] / dim_t
-        pos_h = torch.stack((pos_h[:, :, 0::2].sin(), pos_h[:, :, 1::2].cos()), dim=3).flatten(2)
+        pos_h = jt.stack((pos_h[:, :, 0::2].sin(), pos_h[:, :, 1::2].cos()), dim=3).flatten(2)
 
-        pos = torch.cat((pos_y, pos_x, pos_w, pos_h), dim=2)
+        pos = jt.concat((pos_y, pos_x, pos_w, pos_h), dim=2)
     else:
-        raise ValueError("Unknown pos_tensor shape(-1):{}".format(pos_tensor.size(-1)))
+        raise ValueError("Unknown pos_tensor shape(-1):{}".format(pos_tensor.shape[-1]))
     return pos
 
 
@@ -239,7 +225,7 @@ class ContrastiveEmbed(nn.Module):
         super().__init__()
         self.max_text_len = max_text_len
 
-    def forward(self, x, text_dict):
+    def execute(self, x, text_dict):
         """_summary_
 
         Args:
@@ -259,10 +245,10 @@ class ContrastiveEmbed(nn.Module):
         text_token_mask = text_dict["text_token_mask"]
 
         res = x @ y.transpose(-1, -2)
-        res.masked_fill_(~text_token_mask[:, None, :], float("-inf"))
+        res = res.masked_fill(~text_token_mask[:, None, :], float("-inf"))
 
         # padding to max_text_len
-        new_res = torch.full((*res.shape[:-1], self.max_text_len), float("-inf"), device=res.device)
+        new_res = jt.full((*res.shape[:-1], self.max_text_len), float("-inf"), device=res.device)
         new_res[..., : res.shape[-1]] = res
 
         return new_res

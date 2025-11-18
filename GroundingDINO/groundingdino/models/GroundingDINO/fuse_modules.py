@@ -5,9 +5,8 @@
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import jittor as jt
+import jittor.nn as nn
 from timm.models.layers import DropPath
 
 
@@ -25,7 +24,7 @@ class FeatureResizer(nn.Module):
         self.layer_norm = nn.LayerNorm(output_feat_size, eps=1e-12)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, encoder_features):
+    def execute(self, encoder_features):
         x = self.fc(encoder_features)
         if self.do_ln:
             x = self.layer_norm(x)
@@ -35,15 +34,15 @@ class FeatureResizer(nn.Module):
 
 def l1norm(X, dim, eps=1e-8):
     """L1-normalize columns of X"""
-    norm = torch.abs(X).sum(dim=dim, keepdim=True) + eps
-    X = torch.div(X, norm)
+    norm = jt.abs(X).sum(dim=dim, keepdims=True) + eps
+    X = X / norm
     return X
 
 
 def l2norm(X, dim, eps=1e-8):
     """L2-normalize columns of X"""
-    norm = torch.pow(X, 2).sum(dim=dim, keepdim=True).sqrt() + eps
-    X = torch.div(X, norm)
+    norm = jt.pow(X, 2).sum(dim=dim, keepdims=True).sqrt() + eps
+    X = X / norm
     return X
 
 
@@ -52,20 +51,20 @@ def func_attention(query, context, smooth=1, raw_feature_norm="softmax", eps=1e-
     query: (n_context, queryL, d)
     context: (n_context, sourceL, d)
     """
-    batch_size_q, queryL = query.size(0), query.size(1)
-    batch_size, sourceL = context.size(0), context.size(1)
+    batch_size_q, queryL = query.shape[0], query.shape[1]
+    batch_size, sourceL = context.shape[0], context.shape[1]
 
     # Get attention
     # --> (batch, d, queryL)
-    queryT = torch.transpose(query, 1, 2)
+    queryT = query.transpose(1, 2)
 
     # (batch, sourceL, d)(batch, d, queryL)
     # --> (batch, sourceL, queryL)
-    attn = torch.bmm(context, queryT)
+    attn = jt.bmm(context, queryT)
     if raw_feature_norm == "softmax":
         # --> (batch*sourceL, queryL)
         attn = attn.view(batch_size * sourceL, queryL)
-        attn = nn.Softmax()(attn)
+        attn = nn.softmax(attn, dim=-1)
         # --> (batch, sourceL, queryL)
         attn = attn.view(batch_size, sourceL, queryL)
     elif raw_feature_norm == "l2norm":
@@ -76,22 +75,22 @@ def func_attention(query, context, smooth=1, raw_feature_norm="softmax", eps=1e-
     else:
         raise ValueError("unknown first norm type:", raw_feature_norm)
     # --> (batch, queryL, sourceL)
-    attn = torch.transpose(attn, 1, 2).contiguous()
+    attn = attn.transpose(1, 2)
     # --> (batch*queryL, sourceL)
     attn = attn.view(batch_size * queryL, sourceL)
-    attn = nn.Softmax()(attn * smooth)
+    attn = nn.softmax(attn * smooth, dim=-1)
     # --> (batch, queryL, sourceL)
     attn = attn.view(batch_size, queryL, sourceL)
     # --> (batch, sourceL, queryL)
-    attnT = torch.transpose(attn, 1, 2).contiguous()
+    attnT = attn.transpose(1, 2)
 
     # --> (batch, d, sourceL)
-    contextT = torch.transpose(context, 1, 2)
+    contextT = context.transpose(1, 2)
     # (batch x d x sourceL)(batch x sourceL x queryL)
     # --> (batch, d, queryL)
-    weightedContext = torch.bmm(contextT, attnT)
+    weightedContext = jt.bmm(contextT, attnT)
     # --> (batch, queryL, d)
-    weightedContext = torch.transpose(weightedContext, 1, 2)
+    weightedContext = weightedContext.transpose(1, 2)
 
     return weightedContext, attnT
 
@@ -126,8 +125,8 @@ class BiMultiHeadAttention(nn.Module):
 
         self._reset_parameters()
 
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+    def _shape(self, tensor: jt.Var, seq_len: int, bsz: int):
+        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
 
     def _reset_parameters(self):
         nn.init.xavier_uniform_(self.v_proj.weight)
@@ -143,7 +142,7 @@ class BiMultiHeadAttention(nn.Module):
         nn.init.xavier_uniform_(self.out_l_proj.weight)
         self.out_l_proj.bias.data.fill_(0)
 
-    def forward(self, v, l, attention_mask_v=None, attention_mask_l=None):
+    def execute(self, v, l, attention_mask_v=None, attention_mask_l=None):
         """_summary_
 
         Args:
@@ -157,7 +156,7 @@ class BiMultiHeadAttention(nn.Module):
         """
         # if os.environ.get('IPDB_SHILONG_DEBUG', None) == 'INFO':
         #     import ipdb; ipdb.set_trace()
-        bsz, tgt_len, _ = v.size()
+        bsz, tgt_len, _ = v.shape
 
         query_states = self.v_proj(v) * self.scale
         key_states = self._shape(self.l_proj(l), -1, bsz)
@@ -170,35 +169,35 @@ class BiMultiHeadAttention(nn.Module):
         value_v_states = value_v_states.view(*proj_shape)
         value_l_states = value_l_states.view(*proj_shape)
 
-        src_len = key_states.size(1)
-        attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))  # bs*nhead, nimg, ntxt
+        src_len = key_states.shape[1]
+        attn_weights = jt.bmm(query_states, key_states.transpose(1, 2))  # bs*nhead, nimg, ntxt
 
-        if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
+        if attn_weights.shape != (bsz * self.num_heads, tgt_len, src_len):
             raise ValueError(
-                f"Attention weights should be of size {(bsz * self.num_heads, tgt_len, src_len)}, but is {attn_weights.size()}"
+                f"Attention weights should be of size {(bsz * self.num_heads, tgt_len, src_len)}, but is {attn_weights.shape}"
             )
 
         if self.stable_softmax_2d:
             attn_weights = attn_weights - attn_weights.max()
 
         if self.clamp_min_for_underflow:
-            attn_weights = torch.clamp(
-                attn_weights, min=-50000
+            attn_weights = jt.clamp(
+                attn_weights, min_v=-50000
             )  # Do not increase -50000, data type half has quite limited range
         if self.clamp_max_for_overflow:
-            attn_weights = torch.clamp(
-                attn_weights, max=50000
+            attn_weights = jt.clamp(
+                attn_weights, max_v=50000
             )  # Do not increase 50000, data type half has quite limited range
 
         attn_weights_T = attn_weights.transpose(1, 2)
-        attn_weights_l = attn_weights_T - torch.max(attn_weights_T, dim=-1, keepdim=True)[0]
+        attn_weights_l = attn_weights_T - attn_weights_T.max(dim=-1, keepdims=True)[0]
         if self.clamp_min_for_underflow:
-            attn_weights_l = torch.clamp(
-                attn_weights_l, min=-50000
+            attn_weights_l = jt.clamp(
+                attn_weights_l, min_v=-50000
             )  # Do not increase -50000, data type half has quite limited range
         if self.clamp_max_for_overflow:
-            attn_weights_l = torch.clamp(
-                attn_weights_l, max=50000
+            attn_weights_l = jt.clamp(
+                attn_weights_l, max_v=50000
             )  # Do not increase 50000, data type half has quite limited range
 
         # mask vison for language
@@ -206,32 +205,32 @@ class BiMultiHeadAttention(nn.Module):
             attention_mask_v = (
                 attention_mask_v[:, None, None, :].repeat(1, self.num_heads, 1, 1).flatten(0, 1)
             )
-            attn_weights_l.masked_fill_(attention_mask_v, float("-inf"))
+            attn_weights_l = attn_weights_l.masked_fill(attention_mask_v, float("-inf"))
 
-        attn_weights_l = attn_weights_l.softmax(dim=-1)
+        attn_weights_l = nn.softmax(attn_weights_l, dim=-1)
 
         # mask language for vision
         if attention_mask_l is not None:
             attention_mask_l = (
                 attention_mask_l[:, None, None, :].repeat(1, self.num_heads, 1, 1).flatten(0, 1)
             )
-            attn_weights.masked_fill_(attention_mask_l, float("-inf"))
-        attn_weights_v = attn_weights.softmax(dim=-1)
+            attn_weights = attn_weights.masked_fill(attention_mask_l, float("-inf"))
+        attn_weights_v = nn.softmax(attn_weights, dim=-1)
 
-        attn_probs_v = F.dropout(attn_weights_v, p=self.dropout, training=self.training)
-        attn_probs_l = F.dropout(attn_weights_l, p=self.dropout, training=self.training)
+        attn_probs_v = nn.dropout(attn_weights_v, p=self.dropout)
+        attn_probs_l = nn.dropout(attn_weights_l, p=self.dropout)
 
-        attn_output_v = torch.bmm(attn_probs_v, value_l_states)
-        attn_output_l = torch.bmm(attn_probs_l, value_v_states)
+        attn_output_v = jt.bmm(attn_probs_v, value_l_states)
+        attn_output_l = jt.bmm(attn_probs_l, value_v_states)
 
-        if attn_output_v.size() != (bsz * self.num_heads, tgt_len, self.head_dim):
+        if attn_output_v.shape != (bsz * self.num_heads, tgt_len, self.head_dim):
             raise ValueError(
-                f"`attn_output_v` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is {attn_output_v.size()}"
+                f"`attn_output_v` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is {attn_output_v.shape}"
             )
 
-        if attn_output_l.size() != (bsz * self.num_heads, src_len, self.head_dim):
+        if attn_output_l.shape != (bsz * self.num_heads, src_len, self.head_dim):
             raise ValueError(
-                f"`attn_output_l` should be of size {(bsz, self.num_heads, src_len, self.head_dim)}, but is {attn_output_l.size()}"
+                f"`attn_output_l` should be of size {(bsz, self.num_heads, src_len, self.head_dim)}, but is {attn_output_l.shape}"
             )
 
         attn_output_v = attn_output_v.view(bsz, self.num_heads, tgt_len, self.head_dim)
@@ -280,10 +279,10 @@ class BiAttentionBlock(nn.Module):
 
         # add layer scale for training stability
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.gamma_v = nn.Parameter(init_values * torch.ones((v_dim)), requires_grad=True)
-        self.gamma_l = nn.Parameter(init_values * torch.ones((l_dim)), requires_grad=True)
+        self.gamma_v = nn.Parameter(init_values * jt.ones((v_dim)))
+        self.gamma_l = nn.Parameter(init_values * jt.ones((l_dim)))
 
-    def forward(self, v, l, attention_mask_v=None, attention_mask_l=None):
+    def execute(self, v, l, attention_mask_v=None, attention_mask_l=None):
         v = self.layer_norm_v(v)
         l = self.layer_norm_l(l)
         delta_v, delta_l = self.attn(
@@ -294,4 +293,4 @@ class BiAttentionBlock(nn.Module):
         l = l + self.drop_path(self.gamma_l * delta_l)
         return v, l
 
-    # def forward(self, v:List[torch.Tensor], l, attention_mask_v=None, attention_mask_l=None)
+    # def execute(self, v:List[jt.Var], l, attention_mask_v=None, attention_mask_l=None)
