@@ -1,6 +1,4 @@
-torch
-torchvision
-transformers
+jittor
 addict
 yapf
 timm
