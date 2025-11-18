@@ -18,11 +18,9 @@ Backbone modules.
 
 from typing import Dict, List
 
-import torch
-import torch.nn.functional as F
-import torchvision
-from torch import nn
-from torchvision.models._utils import IntermediateLayerGetter
+import jittor as jt
+import jittor.nn as nn
+from jittor.models import resnet
 
 from groundingdino.util.misc import NestedTensor, clean_state_dict, is_main_process
 
@@ -30,7 +28,7 @@ from .position_encoding import build_position_encoding
 from .swin_transformer import build_swin_transformer
 
 
-class FrozenBatchNorm2d(torch.nn.Module):
+class FrozenBatchNorm2d(nn.Module):
     """
     BatchNorm2d where the batch statistics and the affine parameters are fixed.
 
@@ -41,10 +39,16 @@ class FrozenBatchNorm2d(torch.nn.Module):
 
     def __init__(self, n):
         super(FrozenBatchNorm2d, self).__init__()
-        self.register_buffer("weight", torch.ones(n))
-        self.register_buffer("bias", torch.zeros(n))
-        self.register_buffer("running_mean", torch.zeros(n))
-        self.register_buffer("running_var", torch.ones(n))
+        self.weight = jt.ones(n)
+        self.bias = jt.zeros(n)
+        self.running_mean = jt.zeros(n)
+        self.running_var = jt.ones(n)
+        
+        # 在Jittor中设置为不计算梯度
+        self.weight.stop_grad()
+        self.bias.stop_grad()
+        self.running_mean.stop_grad()
+        self.running_var.stop_grad()
 
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
@@ -57,7 +61,7 @@ class FrozenBatchNorm2d(torch.nn.Module):
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
 
-    def forward(self, x):
+    def execute(self, x):
         # move reshapes to the beginning
         # to make it fuser-friendly
         w = self.weight.reshape(1, -1, 1, 1)
@@ -68,6 +72,43 @@ class FrozenBatchNorm2d(torch.nn.Module):
         scale = w * (rv + eps).rsqrt()
         bias = b - rm * scale
         return x * scale + bias
+
+
+class IntermediateLayerGetter(nn.Module):
+    """
+    Jittor版本的IntermediateLayerGetter
+    用于从backbone中提取多层特征
+    """
+    
+    def __init__(self, model, return_layers):
+        super().__init__()
+        self.model = model
+        self.return_layers = return_layers
+
+    def execute(self, x):
+        out = {}
+        
+        # Stem部分
+        x = self.model.conv1(x)
+        x = self.model.bn1(x)
+        x = self.model.relu(x)
+        x = self.model.maxpool(x)
+        
+        # 逐层处理
+        layers = [
+            ('layer1', self.model.layer1),
+            ('layer2', self.model.layer2),
+            ('layer3', self.model.layer3),
+            ('layer4', self.model.layer4)
+        ]
+        
+        for layer_name, layer_func in layers:
+            x = layer_func(x)
+            if layer_name in self.return_layers:
+                out_key = self.return_layers[layer_name]
+                out[out_key] = x
+                
+        return out
 
 
 class BackboneBase(nn.Module):
@@ -86,7 +127,7 @@ class BackboneBase(nn.Module):
                 and "layer3" not in name
                 and "layer4" not in name
             ):
-                parameter.requires_grad_(False)
+                parameter.stop_grad()  # Jittor中使用stop_grad
 
         return_layers = {}
         for idx, layer_index in enumerate(return_interm_indices):
@@ -94,25 +135,18 @@ class BackboneBase(nn.Module):
                 {"layer{}".format(5 - len(return_interm_indices) + idx): "{}".format(layer_index)}
             )
 
-        # if len:
-        #     if use_stage1_feature:
-        #         return_layers = {"layer1": "0", "layer2": "1", "layer3": "2", "layer4": "3"}
-        #     else:
-        #         return_layers = {"layer2": "0", "layer3": "1", "layer4": "2"}
-        # else:
-        #     return_layers = {'layer4': "0"}
         self.body = IntermediateLayerGetter(backbone, return_layers=return_layers)
         self.num_channels = num_channels
 
-    def forward(self, tensor_list: NestedTensor):
+    def execute(self, tensor_list: NestedTensor):
         xs = self.body(tensor_list.tensors)
         out: Dict[str, NestedTensor] = {}
         for name, x in xs.items():
             m = tensor_list.mask
             assert m is not None
-            mask = F.interpolate(m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
+            # Jittor的interpolate用法
+            mask = nn.interpolate(m.float().unsqueeze(0), size=x.shape[-2:]).to(jt.bool).squeeze(0)
             out[name] = NestedTensor(x, mask)
-        # import ipdb; ipdb.set_trace()
         return out
 
 
@@ -127,34 +161,45 @@ class Backbone(BackboneBase):
         return_interm_indices: list,
         batch_norm=FrozenBatchNorm2d,
     ):
-        if name in ["resnet18", "resnet34", "resnet50", "resnet101"]:
-            backbone = getattr(torchvision.models, name)(
-                replace_stride_with_dilation=[False, False, dilation],
-                pretrained=is_main_process(),
-                norm_layer=batch_norm,
-            )
+        # 使用Jittor的resnet模型
+        if name == "resnet50":
+            backbone = resnet.resnet50(pretrained=is_main_process())
+        elif name == "resnet101":
+            backbone = resnet.resnet101(pretrained=is_main_process())
+        elif name == "resnet18":
+            backbone = resnet.resnet18(pretrained=is_main_process())
+        elif name == "resnet34":
+            backbone = resnet.resnet34(pretrained=is_main_process())
         else:
             raise NotImplementedError("Why you can get here with name {}".format(name))
-        # num_channels = 512 if name in ('resnet18', 'resnet34') else 2048
+        
+        # 处理dilation参数 - 需要根据Jittor的resnet实现进行调整
+        if dilation:
+            # 这里需要根据Jittor resnet的具体实现来修改dilation
+            # 可能需要手动修改相关层的配置
+            pass
+            
         assert name not in ("resnet18", "resnet34"), "Only resnet50 and resnet101 are available."
         assert return_interm_indices in [[0, 1, 2, 3], [1, 2, 3], [3]]
         num_channels_all = [256, 512, 1024, 2048]
-        num_channels = num_channels_all[4 - len(return_interm_indices) :]
+        num_channels = num_channels_all[4 - len(return_interm_indices):]
         super().__init__(backbone, train_backbone, num_channels, return_interm_indices)
 
 
-class Joiner(nn.Sequential):
+class Joiner(nn.Module):
     def __init__(self, backbone, position_embedding):
-        super().__init__(backbone, position_embedding)
+        super().__init__()
+        self.backbone = backbone
+        self.position_embedding = position_embedding
 
-    def forward(self, tensor_list: NestedTensor):
-        xs = self[0](tensor_list)
+    def execute(self, tensor_list: NestedTensor):
+        xs = self.backbone(tensor_list)
         out: List[NestedTensor] = []
         pos = []
         for name, x in xs.items():
             out.append(x)
             # position encoding
-            pos.append(self[1](x).to(x.tensors.dtype))
+            pos.append(self.position_embedding(x).to(x.tensors.dtype))
 
         return out, pos
 
@@ -168,7 +213,6 @@ def build_backbone(args):
         - return_interm_indices: available: [0,1,2,3], [1,2,3], [3]
         - backbone_freeze_keywords:
         - use_checkpoint: for swin only for now
-
     """
     position_embedding = build_position_encoding(args)
     train_backbone = True
@@ -176,7 +220,9 @@ def build_backbone(args):
         raise ValueError("Please set lr_backbone > 0")
     return_interm_indices = args.return_interm_indices
     assert return_interm_indices in [[0, 1, 2, 3], [1, 2, 3], [3]]
-    args.backbone_freeze_keywords
+    
+    if hasattr(args, "backbone_freeze_keywords"):
+        args.backbone_freeze_keywords
     use_checkpoint = getattr(args, "use_checkpoint", False)
 
     if args.backbone in ["resnet50", "resnet101"]:
@@ -204,7 +250,7 @@ def build_backbone(args):
             use_checkpoint=use_checkpoint,
         )
 
-        bb_num_channels = backbone.num_features[4 - len(return_interm_indices) :]
+        bb_num_channels = backbone.num_features[4 - len(return_interm_indices):]
     else:
         raise NotImplementedError("Unknown backbone {}".format(args.backbone))
 
@@ -217,5 +263,5 @@ def build_backbone(args):
     assert isinstance(
         bb_num_channels, List
     ), "bb_num_channels is expected to be a List but {}".format(type(bb_num_channels))
-    # import ipdb; ipdb.set_trace()
+    
     return model

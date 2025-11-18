@@ -18,9 +18,9 @@
 
 from typing import Optional
 
-import torch
-import torch.utils.checkpoint as checkpoint
-from torch import Tensor, nn
+import jittor as jt
+import jittor.nn as nn
+from jittor import Var
 
 from groundingdino.util.misc import inverse_sigmoid
 
@@ -154,7 +154,7 @@ class Transformer(nn.Module):
 
         if num_feature_levels > 1:
             if self.num_encoder_layers > 0:
-                self.level_embed = nn.Parameter(torch.Tensor(num_feature_levels, d_model))
+                self.level_embed = nn.Parameter(jt.zeros((num_feature_levels, d_model)))
             else:
                 self.level_embed = None
 
@@ -163,7 +163,7 @@ class Transformer(nn.Module):
         self.embed_init_tgt = embed_init_tgt
         if (two_stage_type != "no" and embed_init_tgt) or (two_stage_type == "no"):
             self.tgt_embed = nn.Embedding(self.num_queries, d_model)
-            nn.init.normal_(self.tgt_embed.weight.data)
+            nn.init.normal_(self.tgt_embed.weight)
         else:
             self.tgt_embed = None
 
@@ -198,17 +198,17 @@ class Transformer(nn.Module):
 
     def get_valid_ratio(self, mask):
         _, H, W = mask.shape
-        valid_H = torch.sum(~mask[:, :, 0], 1)
-        valid_W = torch.sum(~mask[:, 0, :], 1)
+        valid_H = jt.sum(~mask[:, :, 0], 1)
+        valid_W = jt.sum(~mask[:, 0, :], 1)
         valid_ratio_h = valid_H.float() / H
         valid_ratio_w = valid_W.float() / W
-        valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1)
+        valid_ratio = jt.stack([valid_ratio_w, valid_ratio_h], -1)
         return valid_ratio
 
     def init_ref_points(self, use_num_queries):
         self.refpoint_embed = nn.Embedding(use_num_queries, 4)
 
-    def forward(self, srcs, masks, refpoint_embed, pos_embeds, tgt, attn_mask=None, text_dict=None):
+    def execute(self, srcs, masks, refpoint_embed, pos_embeds, tgt, attn_mask=None, text_dict=None):
         """
         Input:
             - srcs: List of multi features [bs, ci, hi, wi]
@@ -238,16 +238,14 @@ class Transformer(nn.Module):
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             src_flatten.append(src)
             mask_flatten.append(mask)
-        src_flatten = torch.cat(src_flatten, 1)  # bs, \sum{hxw}, c
-        mask_flatten = torch.cat(mask_flatten, 1)  # bs, \sum{hxw}
-        lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)  # bs, \sum{hxw}, c
-        spatial_shapes = torch.as_tensor(
-            spatial_shapes, dtype=torch.long, device=src_flatten.device
+        src_flatten = jt.concat(src_flatten, 1)  # bs, \sum{hxw}, c
+        mask_flatten = jt.concat(mask_flatten, 1)  # bs, \sum{hxw}
+        lvl_pos_embed_flatten = jt.concat(lvl_pos_embed_flatten, 1)  # bs, \sum{hxw}, c
+        spatial_shapes = jt.array(spatial_shapes, dtype=jt.int64)
+        level_start_index = jt.concat(
+            (jt.zeros((1,), dtype=jt.int64), spatial_shapes.prod(1).cumsum(0)[:-1])
         )
-        level_start_index = torch.cat(
-            (spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1])
-        )
-        valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
+        valid_ratios = jt.stack([self.get_valid_ratio(m) for m in masks], 1)
 
         # two stage
         enc_topk_proposals = enc_refpoint_embed = None
@@ -298,19 +296,19 @@ class Transformer(nn.Module):
             )  # (bs, \sum{hw}, 4) unsigmoid
             topk = self.num_queries
 
-            topk_proposals = torch.topk(topk_logits, topk, dim=1)[1]  # bs, nq
+            topk_proposals = jt.topk(topk_logits, topk, dim=1)[1]  # bs, nq
 
             # gather boxes
-            refpoint_embed_undetach = torch.gather(
+            refpoint_embed_undetach = jt.gather(
                 enc_outputs_coord_unselected, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)
             )  # unsigmoid
             refpoint_embed_ = refpoint_embed_undetach.detach()
-            init_box_proposal = torch.gather(
+            init_box_proposal = jt.gather(
                 output_proposals, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)
             ).sigmoid()  # sigmoid
 
             # gather tgt
-            tgt_undetach = torch.gather(
+            tgt_undetach = jt.gather(
                 output_memory, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model)
             )
             if self.embed_init_tgt:
@@ -321,8 +319,8 @@ class Transformer(nn.Module):
                 tgt_ = tgt_undetach.detach()
 
             if refpoint_embed is not None:
-                refpoint_embed = torch.cat([refpoint_embed, refpoint_embed_], dim=1)
-                tgt = torch.cat([tgt, tgt_], dim=1)
+                refpoint_embed = jt.concat([refpoint_embed, refpoint_embed_], dim=1)
+                tgt = jt.concat([tgt, tgt_], dim=1)
             else:
                 refpoint_embed, tgt = refpoint_embed_, tgt_
 
@@ -335,8 +333,8 @@ class Transformer(nn.Module):
             )  # nq, bs, 4
 
             if refpoint_embed is not None:
-                refpoint_embed = torch.cat([refpoint_embed, refpoint_embed_], dim=1)
-                tgt = torch.cat([tgt, tgt_], dim=1)
+                refpoint_embed = jt.concat([refpoint_embed, refpoint_embed_], dim=1)
+                tgt = jt.concat([tgt, tgt_], dim=1)
             else:
                 refpoint_embed, tgt = refpoint_embed_, tgt_
 
@@ -467,33 +465,33 @@ class TransformerEncoder(nn.Module):
         reference_points_list = []
         for lvl, (H_, W_) in enumerate(spatial_shapes):
 
-            ref_y, ref_x = torch.meshgrid(
-                torch.linspace(0.5, H_ - 0.5, H_, dtype=torch.float32, device=device),
-                torch.linspace(0.5, W_ - 0.5, W_, dtype=torch.float32, device=device),
+            ref_y, ref_x = jt.meshgrid(
+                jt.linspace(0.5, H_ - 0.5, H_, dtype=jt.float32),
+                jt.linspace(0.5, W_ - 0.5, W_, dtype=jt.float32),
             )
             ref_y = ref_y.reshape(-1)[None] / (valid_ratios[:, None, lvl, 1] * H_)
             ref_x = ref_x.reshape(-1)[None] / (valid_ratios[:, None, lvl, 0] * W_)
-            ref = torch.stack((ref_x, ref_y), -1)
+            ref = jt.stack((ref_x, ref_y), -1)
             reference_points_list.append(ref)
-        reference_points = torch.cat(reference_points_list, 1)
+        reference_points = jt.concat(reference_points_list, 1)
         reference_points = reference_points[:, :, None] * valid_ratios[:, None]
         return reference_points
 
-    def forward(
+    def execute(
         self,
         # for images
-        src: Tensor,
-        pos: Tensor,
-        spatial_shapes: Tensor,
-        level_start_index: Tensor,
-        valid_ratios: Tensor,
-        key_padding_mask: Tensor,
+        src: jt.Var,
+        pos: jt.Var,
+        spatial_shapes: jt.Var,
+        level_start_index: jt.Var,
+        valid_ratios: jt.Var,
+        key_padding_mask: jt.Var,
         # for texts
-        memory_text: Tensor = None,
-        text_attention_mask: Tensor = None,
-        pos_text: Tensor = None,
-        text_self_attention_masks: Tensor = None,
-        position_ids: Tensor = None,
+        memory_text: jt.Var = None,
+        text_attention_mask: jt.Var = None,
+        pos_text: jt.Var = None,
+        text_self_attention_masks: jt.Var = None,
+        position_ids: jt.Var = None,
     ):
         """
         Input:
@@ -529,8 +527,7 @@ class TransformerEncoder(nn.Module):
             bs, n_text, text_dim = memory_text.shape
             if pos_text is None and position_ids is None:
                 pos_text = (
-                    torch.arange(n_text, device=memory_text.device)
-                    .float()
+                    jt.arange(n_text, dtype=jt.float32)
                     .unsqueeze(0)
                     .unsqueeze(-1)
                     .repeat(bs, 1, 1)
@@ -548,12 +545,12 @@ class TransformerEncoder(nn.Module):
             #         import ipdb; ipdb.set_trace()
             if self.fusion_layers:
                 if self.use_checkpoint:
-                    output, memory_text = checkpoint.checkpoint(
-                        self.fusion_layers[layer_id],
-                        output,
-                        memory_text,
-                        key_padding_mask,
-                        text_attention_mask,
+                    # Jittor doesn't have checkpoint, use normal forward
+                    output, memory_text = self.fusion_layers[layer_id](
+                        v=output,
+                        l=memory_text,
+                        attention_mask_v=key_padding_mask,
+                        attention_mask_l=text_attention_mask,
                     )
                 else:
                     output, memory_text = self.fusion_layers[layer_id](
@@ -573,14 +570,14 @@ class TransformerEncoder(nn.Module):
 
             # main process
             if self.use_transformer_ckpt:
-                output = checkpoint.checkpoint(
-                    layer,
-                    output,
-                    pos,
-                    reference_points,
-                    spatial_shapes,
-                    level_start_index,
-                    key_padding_mask,
+                # Jittor doesn't have checkpoint, use normal forward
+                output = layer(
+                    src=output,
+                    pos=pos,
+                    reference_points=reference_points,
+                    spatial_shapes=spatial_shapes,
+                    level_start_index=level_start_index,
+                    key_padding_mask=key_padding_mask,
                 )
             else:
                 output = layer(
@@ -630,23 +627,23 @@ class TransformerDecoder(nn.Module):
 
         self.ref_anchor_head = None
 
-    def forward(
+    def execute(
         self,
         tgt,
         memory,
-        tgt_mask: Optional[Tensor] = None,
-        memory_mask: Optional[Tensor] = None,
-        tgt_key_padding_mask: Optional[Tensor] = None,
-        memory_key_padding_mask: Optional[Tensor] = None,
-        pos: Optional[Tensor] = None,
-        refpoints_unsigmoid: Optional[Tensor] = None,  # num_queries, bs, 2
+        tgt_mask: Optional[jt.Var] = None,
+        memory_mask: Optional[jt.Var] = None,
+        tgt_key_padding_mask: Optional[jt.Var] = None,
+        memory_key_padding_mask: Optional[jt.Var] = None,
+        pos: Optional[jt.Var] = None,
+        refpoints_unsigmoid: Optional[jt.Var] = None,  # num_queries, bs, 2
         # for memory
-        level_start_index: Optional[Tensor] = None,  # num_levels
-        spatial_shapes: Optional[Tensor] = None,  # bs, num_levels, 2
-        valid_ratios: Optional[Tensor] = None,
+        level_start_index: Optional[jt.Var] = None,  # num_levels
+        spatial_shapes: Optional[jt.Var] = None,  # bs, num_levels, 2
+        valid_ratios: Optional[jt.Var] = None,
         # for text
-        memory_text: Optional[Tensor] = None,
-        text_attention_mask: Optional[Tensor] = None,
+        memory_text: Optional[jt.Var] = None,
+        text_attention_mask: Optional[jt.Var] = None,
     ):
         """
         Input:
@@ -667,14 +664,14 @@ class TransformerDecoder(nn.Module):
             if reference_points.shape[-1] == 4:
                 reference_points_input = (
                     reference_points[:, :, None]
-                    * torch.cat([valid_ratios, valid_ratios], -1)[None, :]
+                    * jt.concat([valid_ratios, valid_ratios], -1)[None, :]
                 )  # nq, bs, nlevel, 4
             else:
                 assert reference_points.shape[-1] == 2
                 reference_points_input = reference_points[:, :, None] * valid_ratios[None, :]
             query_sine_embed = gen_sineembed_for_position(
                 reference_points_input[:, :, 0, :]
-            )  # nq, bs, 256*2
+            )  # nq, bs, 256 * 2
 
             # conditional query
             raw_query_pos = self.ref_point_head(query_sine_embed)  # nq, bs, 256
@@ -714,10 +711,6 @@ class TransformerDecoder(nn.Module):
 
             # iter update
             if self.bbox_embed is not None:
-                # box_holder = self.bbox_embed(output)
-                # box_holder[..., :self.query_dim] += inverse_sigmoid(reference_points)
-                # new_reference_points = box_holder[..., :self.query_dim].sigmoid()
-
                 reference_before_sigmoid = inverse_sigmoid(reference_points)
                 delta_unsig = self.bbox_embed[layer_id](output)
                 outputs_unsig = delta_unsig + reference_before_sigmoid
@@ -777,7 +770,7 @@ class DeformableTransformerEncoderLayer(nn.Module):
         src = self.norm2(src)
         return src
 
-    def forward(
+    def execute(
         self, src, pos, reference_points, spatial_shapes, level_start_index, key_padding_mask=None
     ):
         # self attention
@@ -859,31 +852,30 @@ class DeformableTransformerDecoderLayer(nn.Module):
         return tensor if pos is None else tensor + pos
 
     def forward_ffn(self, tgt):
-        with torch.cuda.amp.autocast(enabled=False):
-            tgt2 = self.linear2(self.dropout3(self.activation(self.linear1(tgt))))
+        tgt2 = self.linear2(self.dropout3(self.activation(self.linear1(tgt))))
         tgt = tgt + self.dropout4(tgt2)
         tgt = self.norm3(tgt)
         return tgt
 
-    def forward(
+    def execute(
         self,
         # for tgt
-        tgt: Optional[Tensor],  # nq, bs, d_model
-        tgt_query_pos: Optional[Tensor] = None,  # pos for query. MLP(Sine(pos))
-        tgt_query_sine_embed: Optional[Tensor] = None,  # pos for query. Sine(pos)
-        tgt_key_padding_mask: Optional[Tensor] = None,
-        tgt_reference_points: Optional[Tensor] = None,  # nq, bs, 4
-        memory_text: Optional[Tensor] = None,  # bs, num_token, d_model
-        text_attention_mask: Optional[Tensor] = None,  # bs, num_token
+        tgt: Optional[jt.Var],  # nq, bs, d_model
+        tgt_query_pos: Optional[jt.Var] = None,  # pos for query. MLP(Sine(pos))
+        tgt_query_sine_embed: Optional[jt.Var] = None,  # pos for query. Sine(pos)
+        tgt_key_padding_mask: Optional[jt.Var] = None,
+        tgt_reference_points: Optional[jt.Var] = None,  # nq, bs, 4
+        memory_text: Optional[jt.Var] = None,  # bs, num_token, d_model
+        text_attention_mask: Optional[jt.Var] = None,  # bs, num_token
         # for memory
-        memory: Optional[Tensor] = None,  # hw, bs, d_model
-        memory_key_padding_mask: Optional[Tensor] = None,
-        memory_level_start_index: Optional[Tensor] = None,  # num_levels
-        memory_spatial_shapes: Optional[Tensor] = None,  # bs, num_levels, 2
-        memory_pos: Optional[Tensor] = None,  # pos for memory
+        memory: Optional[jt.Var] = None,  # hw, bs, d_model
+        memory_key_padding_mask: Optional[jt.Var] = None,
+        memory_level_start_index: Optional[jt.Var] = None,  # num_levels
+        memory_spatial_shapes: Optional[jt.Var] = None,  # bs, num_levels, 2
+        memory_pos: Optional[jt.Var] = None,  # pos for memory
         # sa
-        self_attn_mask: Optional[Tensor] = None,  # mask used for self-attention
-        cross_attn_mask: Optional[Tensor] = None,  # mask used for cross-attention
+        self_attn_mask: Optional[jt.Var] = None,  # mask used for self-attention
+        cross_attn_mask: Optional[jt.Var] = None,  # mask used for cross-attention
     ):
         """
         Input:

@@ -19,7 +19,7 @@ import os
 
 import numpy as np
 import pycocotools.mask as mask_util
-import torch
+import jittor as jt
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
@@ -94,9 +94,18 @@ class CocoGroundingEvaluator(object):
                 continue
 
             boxes = prediction["boxes"]
+            # 将 Jittor Tensor 转换为 numpy 数组进行处理
+            if isinstance(boxes, jt.Var):
+                boxes = boxes.numpy()
             boxes = convert_to_xywh(boxes).tolist()
-            scores = prediction["scores"].tolist()
-            labels = prediction["labels"].tolist()
+            scores = prediction["scores"]
+            if isinstance(scores, jt.Var):
+                scores = scores.numpy()
+            scores = scores.tolist()
+            labels = prediction["labels"]
+            if isinstance(labels, jt.Var):
+                labels = labels.numpy()
+            labels = labels.tolist()
 
             coco_results.extend(
                 [
@@ -121,10 +130,17 @@ class CocoGroundingEvaluator(object):
             labels = prediction["labels"]
             masks = prediction["masks"]
 
+            # 处理 Jittor Tensor
+            if isinstance(masks, jt.Var):
+                masks = masks.numpy()
             masks = masks > 0.5
 
-            scores = prediction["scores"].tolist()
-            labels = prediction["labels"].tolist()
+            if isinstance(scores, jt.Var):
+                scores = scores.numpy()
+            scores = scores.tolist()
+            if isinstance(labels, jt.Var):
+                labels = labels.numpy()
+            labels = labels.tolist()
 
             rles = [
                 mask_util.encode(np.array(mask[0, :, :, np.newaxis], dtype=np.uint8, order="F"))[0] 
@@ -153,11 +169,24 @@ class CocoGroundingEvaluator(object):
                 continue
 
             boxes = prediction["boxes"]
+            if isinstance(boxes, jt.Var):
+                boxes = boxes.numpy()
             boxes = convert_to_xywh(boxes).tolist()
-            scores = prediction["scores"].tolist()
-            labels = prediction["labels"].tolist()
+            
+            scores = prediction["scores"]
+            if isinstance(scores, jt.Var):
+                scores = scores.numpy()
+            scores = scores.tolist()
+            
+            labels = prediction["labels"]
+            if isinstance(labels, jt.Var):
+                labels = labels.numpy()
+            labels = labels.tolist()
+            
             keypoints = prediction["keypoints"]
-            keypoints = keypoints.flatten(start_dim=1).tolist()
+            if isinstance(keypoints, jt.Var):
+                keypoints = keypoints.numpy()
+            keypoints = keypoints.reshape(keypoints.shape[0], -1).tolist()
 
             coco_results.extend(
                 [
@@ -174,8 +203,17 @@ class CocoGroundingEvaluator(object):
 
 
 def convert_to_xywh(boxes):
-    xmin, ymin, xmax, ymax = boxes.unbind(1)
-    return torch.stack((xmin, ymin, xmax - xmin, ymax - ymin), dim=1)
+    # 处理 numpy 数组
+    if isinstance(boxes, np.ndarray):
+        xmin, ymin, xmax, ymax = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    # 处理 Jittor Tensor
+    elif isinstance(boxes, jt.Var):
+        xmin, ymin, xmax, ymax = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+        xmin, ymin, xmax, ymax = xmin.numpy(), ymin.numpy(), xmax.numpy(), ymax.numpy()
+    else:
+        raise TypeError("Unsupported type for boxes: {}".format(type(boxes)))
+    
+    return np.stack((xmin, ymin, xmax - xmin, ymax - ymin), axis=1)
 
 
 def merge(img_ids, eval_imgs):
