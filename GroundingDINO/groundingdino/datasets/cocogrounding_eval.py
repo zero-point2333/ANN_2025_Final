@@ -19,7 +19,7 @@ import os
 
 import numpy as np
 import pycocotools.mask as mask_util
-import torch
+import jittor
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
@@ -175,7 +175,7 @@ class CocoGroundingEvaluator(object):
 
 def convert_to_xywh(boxes):
     xmin, ymin, xmax, ymax = boxes.unbind(1)
-    return torch.stack((xmin, ymin, xmax - xmin, ymax - ymin), dim=1)
+    return jittor.misc.stack((xmin, ymin, xmax - xmin, ymax - ymin), dim=1)
 
 
 def merge(img_ids, eval_imgs):
