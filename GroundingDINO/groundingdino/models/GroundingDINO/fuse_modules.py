@@ -7,8 +7,26 @@
 
 import jittor as jt
 import jittor.nn as nn
-from timm.models.layers import DropPath
+import jittor as jt
+import jittor.nn as nn
 
+class DropPath(nn.Module):
+    """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks)."""
+
+    def __init__(self, drop_prob: float = 0.0):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def execute(self, x):
+        if self.drop_prob == 0.0 or not self.is_training():
+            return x
+        keep_prob = 1 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
+        random_tensor = jt.rand(shape, dtype=x.dtype)
+        random_tensor = (random_tensor < keep_prob).float()
+        # scale tensor
+        random_tensor = random_tensor / keep_prob
+        return x * random_tensor
 
 class FeatureResizer(nn.Module):
     """

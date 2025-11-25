@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
+FROM nvidia/cuda:12.1-runtime-ubuntu20.04
 ARG DEBIAN_FRONTEND=noninteractive
 
 ENV CUDA_HOME=/usr/local/cuda \
@@ -19,7 +19,7 @@ RUN apt-get -y update && apt-get install -y --no-install-recommends \
 # Set the working directory for all the subsequent Dockerfile instructions.
 WORKDIR /opt/program
 
-RUN git clone https://github.com/IDEA-Research/GroundingDINO.git
+RUN git clone https://github.com/zero-point2333/ANN_2025_Final.git
 
 RUN mkdir weights ; cd weights ; wget -q https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth ; cd ..
 
