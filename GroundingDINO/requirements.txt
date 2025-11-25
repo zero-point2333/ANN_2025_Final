@@ -5,3 +5,4 @@ numpy
 opencv-python
 supervision>=0.22.0
 pycocotools
+transformers
