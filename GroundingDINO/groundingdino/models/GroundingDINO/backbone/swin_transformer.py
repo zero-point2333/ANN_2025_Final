@@ -15,7 +15,6 @@ import numpy as np
 import jittor as jt
 import jittor.nn as nn
 import jittor.nn as F
-from jittor import checkpoint
 
 from groundingdino.util.misc import NestedTensor
 
@@ -356,7 +355,6 @@ class BasicLayer(nn.Module):
         drop_path (float | tuple[float], optional): Stochastic depth rate. Default: 0.0
         norm_layer (nn.Module, optional): Normalization layer. Default: nn.LayerNorm
         downsample (nn.Module | None, optional): Downsample layer at the end of the layer. Default: None
-        use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
     """
 
     def __init__(
@@ -373,13 +371,11 @@ class BasicLayer(nn.Module):
         drop_path=0.0,
         norm_layer=nn.LayerNorm,
         downsample=None,
-        use_checkpoint=False,
     ):
         super().__init__()
         self.window_size = window_size
         self.shift_size = window_size // 2
         self.depth = depth
-        self.use_checkpoint = use_checkpoint
 
         # build blocks
         self.blocks = nn.ModuleList(
@@ -445,10 +441,7 @@ class BasicLayer(nn.Module):
 
         for blk in self.blocks:
             blk.H, blk.W = H, W
-            if self.use_checkpoint:
-                x = checkpoint(blk, x, attn_mask)
-            else:
-                x = blk(x, attn_mask)
+            x = blk(x, attn_mask)
         if self.downsample is not None:
             x_down = self.downsample(x, H, W)
             Wh, Ww = (H + 1) // 2, (W + 1) // 2
@@ -524,7 +517,6 @@ class SwinTransformer(nn.Module):
         out_indices (Sequence[int]): Output from which stages.
         frozen_stages (int): Stages to be frozen (stop grad and set eval mode).
             -1 means not freezing any parameters.
-        use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
         dilation (bool): if True, the output size if 16x downsample, ow 32x downsample.
     """
 
@@ -549,7 +541,6 @@ class SwinTransformer(nn.Module):
         out_indices=(0, 1, 2, 3),
         frozen_stages=-1,
         dilation=False,
-        use_checkpoint=False,
     ):
         super().__init__()
 
@@ -561,9 +552,6 @@ class SwinTransformer(nn.Module):
         self.out_indices = out_indices
         self.frozen_stages = frozen_stages
         self.dilation = dilation
-
-        # if use_checkpoint:
-        #     print("use_checkpoint!!!!!!!!!!!!!!!!!!!!!!!!")
 
         # split image into non-overlapping patches
         self.patch_embed = PatchEmbed(
@@ -620,7 +608,6 @@ class SwinTransformer(nn.Module):
                 norm_layer=norm_layer,
                 # downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
                 downsample=downsamplelist[i_layer],
-                use_checkpoint=use_checkpoint,
             )
             self.layers.append(layer)
 

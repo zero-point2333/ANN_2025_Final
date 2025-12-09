@@ -1,4 +1,4 @@
-# tests_env/test_ms_deform_attn_jittor.py
+# test_ms_deform_attn_jittor.py
 import jittor as jt
 from jittor import nn
 import numpy as np
@@ -6,7 +6,6 @@ import numpy as np
 from groundingdino.models.GroundingDINO.ops.jittor_ms_deform_attn import ms_deform_attn_core_jittor
 
 def random_test():
-    jt.flags.use_cuda = 0
     N = 2
     num_levels = 2
     HWs = [(6,4), (3,2)]
