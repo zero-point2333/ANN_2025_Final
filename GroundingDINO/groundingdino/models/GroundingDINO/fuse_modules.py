@@ -148,17 +148,24 @@ class BiMultiHeadAttention(nn.Module):
 
     def _reset_parameters(self):
         nn.init.xavier_uniform_(self.v_proj.weight)
-        self.v_proj.bias.data.fill_(0)
         nn.init.xavier_uniform_(self.l_proj.weight)
-        self.l_proj.bias.data.fill_(0)
         nn.init.xavier_uniform_(self.values_v_proj.weight)
-        self.values_v_proj.bias.data.fill_(0)
         nn.init.xavier_uniform_(self.values_l_proj.weight)
-        self.values_l_proj.bias.data.fill_(0)
         nn.init.xavier_uniform_(self.out_v_proj.weight)
-        self.out_v_proj.bias.data.fill_(0)
         nn.init.xavier_uniform_(self.out_l_proj.weight)
-        self.out_l_proj.bias.data.fill_(0)
+
+        if self.v_proj.bias is not None:
+            self.v_proj.bias.data[...] = 0
+        if self.l_proj.bias is not None:
+            self.l_proj.bias.data[...] = 0
+        if self.values_v_proj.bias is not None:
+            self.values_v_proj.bias.data[...] = 0
+        if self.values_l_proj.bias is not None:
+            self.values_l_proj.bias.data[...] = 0
+        if self.out_v_proj.bias is not None:
+            self.out_v_proj.bias.data[...] = 0
+        if self.out_l_proj.bias is not None:
+            self.out_l_proj.bias.data[...] = 0
 
     def execute(self, v, l, attention_mask_v=None, attention_mask_l=None):
         """_summary_

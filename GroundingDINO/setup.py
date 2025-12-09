@@ -1,4 +1,5 @@
 # setup.py - snippet to replace original get_extensions()
+import os
 
 def get_extensions():
     # if target is jittor migration, skip building torch C++ extensions

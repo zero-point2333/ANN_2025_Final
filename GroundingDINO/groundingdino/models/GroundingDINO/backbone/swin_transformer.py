@@ -631,7 +631,7 @@ class SwinTransformer(nn.Module):
         for i_layer in out_indices:
             layer = norm_layer(num_features[i_layer])
             layer_name = f"norm{i_layer}"
-            self.add_module(layer_name, layer)
+            setattr(self, layer_name, layer)
 
         self._freeze_stages()
 

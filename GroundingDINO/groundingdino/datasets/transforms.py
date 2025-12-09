@@ -7,8 +7,8 @@ import random
 
 import PIL
 import jittor as jt
+import numpy as np
 import jittor.transform as T
-import jittor.transform.functional as F
 
 from groundingdino.util.box_ops import box_xyxy_to_cxcywh
 from groundingdino.util.misc import interpolate
@@ -76,7 +76,7 @@ def crop(image, target, region):
 
 
 def hflip(image, target):
-    flipped_image = image.transpose(Image.FLIP_LEFT_RIGHT)
+    flipped_image = image.transpose(PIL.Image.FLIP_LEFT_RIGHT)
 
     w, h = image.size
 
@@ -129,7 +129,7 @@ def resize(image, target, size, max_size=None):
 
     size = get_size(image.size, size, max_size)
     # PIL expects (width, height)
-    rescaled_image = image.resize(size[::-1], resample=Image.BILINEAR)
+    rescaled_image = image.resize(size[::-1], resample=PIL.Image.BILINEAR)
 
     if target is None:
         return rescaled_image, None
@@ -164,7 +164,7 @@ def resize(image, target, size, max_size=None):
 
 def pad(image, target, padding):
     # assumes that we only pad on the bottom right corners
-    padded_image = ImageOps.expand(image, border=(0, 0, padding[0], padding[1]))
+    padded_image = PIL.ImageOps.expand(image, border=(0, 0, padding[0], padding[1]))
     if target is None:
         return padded_image, None
     target = target.copy()
@@ -304,7 +304,7 @@ class ToTensor(object):
     def __call__(self, img, target):
         # Jittor 的 to_tensor 会自动处理 PIL Image
         if isinstance(img, PIL.Image.Image):
-            img = F.to_tensor(img)
+            img = T.to_tensor(img)
         return img, target
 
 
@@ -327,9 +327,9 @@ class Normalize(object):
     def __call__(self, image, target=None):
         # Jittor 的 normalize 需要确保输入是 jt.Var
         if isinstance(image, PIL.Image.Image):
-            image = F.to_tensor(image)
+            image = T.to_tensor(image)
         
-        image = F.normalize(image, mean=self.mean, std=self.std)
+        image = T.image_normalize(image, mean=self.mean, std=self.std)
         if target is None:
             return image, None
         target = target.copy()
