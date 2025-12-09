@@ -1,6 +1,7 @@
 import os
 import random
 
+import numpy as np
 import PIL
 import jittor as jt
 from jittor import transform as T
