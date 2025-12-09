@@ -1,15 +1,9 @@
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
-"""
-Transforms and data augmentation for both image + bbox.
-"""
 import os
 import random
 
 import PIL
 import jittor as jt
-import jittor.transform as T
-import jittor.transform.functional as F
-
+from jittor import transform as T
 from groundingdino.util.box_ops import box_xyxy_to_cxcywh
 from groundingdino.util.misc import interpolate
 
@@ -39,16 +33,11 @@ def crop(image, target, region):
         fields.append("boxes")
 
     if "masks" in target:
-        # FIXME should we update the area here if there are no boxes?
         masks = target["masks"]
-        # masks assumed to be (N, H, W) and support slicing
-        target["masks"] = masks[:, i : i + h, j : j + w]
+        target["masks"] = masks[:, i:i + h, j:j + w]
         fields.append("masks")
 
-    # remove elements for which the boxes or masks that have zero area
     if "boxes" in target or "masks" in target:
-        # favor boxes selection when defining which elements to keep
-        # this is compatible with previous implementation
         if "boxes" in target:
             cropped_boxes = target["boxes"].reshape(-1, 2, 2)
             keep = jt.all(cropped_boxes[:, 1, :] > cropped_boxes[:, 0, :], dim=1)
@@ -64,7 +53,6 @@ def crop(image, target, region):
                 target[field] = target[field][keep]
 
     if os.environ.get("IPDB_SHILONG_DEBUG", None) == "INFO":
-        # for debug and visualization only.
         if "strings_positive" in target:
             if isinstance(keep, jt.Var):
                 keep_np = keep.numpy().tolist()
@@ -76,7 +64,7 @@ def crop(image, target, region):
 
 
 def hflip(image, target):
-    flipped_image = image.transpose(Image.FLIP_LEFT_RIGHT)
+    flipped_image = image.transpose(PIL.Image.FLIP_LEFT_RIGHT)
 
     w, h = image.size
 
@@ -99,8 +87,6 @@ def hflip(image, target):
 
 
 def resize(image, target, size, max_size=None):
-    # size can be min_size (scalar) or (w, h) tuple
-
     def get_size_with_aspect_ratio(image_size, size, max_size=None):
         w, h = image_size
         if max_size is not None:
@@ -128,8 +114,7 @@ def resize(image, target, size, max_size=None):
             return get_size_with_aspect_ratio(image_size, size, max_size)
 
     size = get_size(image.size, size, max_size)
-    # PIL expects (width, height)
-    rescaled_image = image.resize(size[::-1], resample=Image.BILINEAR)
+    rescaled_image = image.resize(size[::-1], resample=PIL.Image.BILINEAR)
 
     if target is None:
         return rescaled_image, None
@@ -156,19 +141,16 @@ def resize(image, target, size, max_size=None):
 
     if "masks" in target:
         masks = target["masks"]
-        # rely on project interpolate (which is already jittor-aware)
         target["masks"] = (interpolate(masks[:, None].astype(jt.float32), size, mode="nearest")[:, 0] > 0.5)
 
     return rescaled_image, target
 
 
 def pad(image, target, padding):
-    # assumes that we only pad on the bottom right corners
-    padded_image = ImageOps.expand(image, border=(0, 0, padding[0], padding[1]))
+    padded_image = PIL.ImageOps.expand(image, border=(0, 0, padding[0], padding[1]))
     if target is None:
         return padded_image, None
     target = target.copy()
-    # should we do something wrt the original size?
     target["size"] = jt.array(padded_image.size[::-1])
     if "masks" in target:
         target["masks"] = jt.nn.pad(target["masks"], (0, padding[0], 0, padding[1]))
@@ -188,18 +170,16 @@ class RandomCrop(object):
         self.size = size
 
     def __call__(self, img, target):
-        # Jittor 的 RandomCrop 参数获取方式
         if isinstance(img, PIL.Image.Image):
             w, h = img.size
         else:
             h, w = img.shape[-2], img.shape[-1]
-        
+
         crop_h, crop_w = self.size
         if crop_h > h or crop_w > w:
-            # 如果裁剪尺寸大于图像尺寸，使用较小的尺寸
             crop_h = min(crop_h, h)
             crop_w = min(crop_w, w)
-        
+
         i = random.randint(0, h - crop_h)
         j = random.randint(0, w - crop_w)
         region = (i, j, crop_h, crop_w)
@@ -208,8 +188,6 @@ class RandomCrop(object):
 
 class RandomSizeCrop(object):
     def __init__(self, min_size: int, max_size: int, respect_boxes: bool = False):
-        # respect_boxes:    True to keep all boxes
-        #                   False to tolerence box filter
         self.min_size = min_size
         self.max_size = max_size
         self.respect_boxes = respect_boxes
@@ -220,12 +198,11 @@ class RandomSizeCrop(object):
         for i in range(max_patience):
             w = random.randint(self.min_size, min(img.width, self.max_size))
             h = random.randint(self.min_size, min(img.height, self.max_size))
-            
-            # 手动实现随机裁剪区域选择
+
             i = random.randint(0, img.height - h) if img.height > h else 0
             j = random.randint(0, img.width - w) if img.width > w else 0
             region = (i, j, h, w)
-            
+
             result_img, result_target = crop(img, target, region)
             if (
                 not self.respect_boxes
@@ -245,7 +222,7 @@ class CenterCrop(object):
             image_width, image_height = img.size
         else:
             image_height, image_width = img.shape[-2], img.shape[-1]
-            
+
         crop_height, crop_width = self.size
         crop_top = int(round((image_height - crop_height) / 2.0))
         crop_left = int(round((image_width - crop_width) / 2.0))
@@ -284,11 +261,6 @@ class RandomPad(object):
 
 
 class RandomSelect(object):
-    """
-    Randomly selects between transforms1 and transforms2,
-    with probability p for transforms1 and (1 - p) for transforms2
-    """
-
     def __init__(self, transforms1, transforms2, p=0.5):
         self.transforms1 = transforms1
         self.transforms2 = transforms2
@@ -302,20 +274,9 @@ class RandomSelect(object):
 
 class ToTensor(object):
     def __call__(self, img, target):
-        # Jittor 的 to_tensor 会自动处理 PIL Image
         if isinstance(img, PIL.Image.Image):
-            img = F.to_tensor(img)
-        return img, target
-
-
-class RandomErasing(object):
-    def __init__(self, *args, **kwargs):
-        # Jittor 目前没有 RandomErasing，可以手动实现或使用其他增强方法
-        # 这里先保持空实现，需要时再补充
-        pass
-
-    def __call__(self, img, target):
-        # TODO: 实现 Jittor 版本的 RandomErasing
+            to_tensor = T.ToTensor()
+            img = to_tensor(img)
         return img, target
 
 
@@ -325,20 +286,22 @@ class Normalize(object):
         self.std = std
 
     def __call__(self, image, target=None):
-        # Jittor 的 normalize 需要确保输入是 jt.Var
         if isinstance(image, PIL.Image.Image):
-            image = F.to_tensor(image)
-        
-        image = F.normalize(image, mean=self.mean, std=self.std)
+            to_tensor = T.ToTensor()
+            image = to_tensor(image)
+
+        normalize = T.ImageNormalize(mean=self.mean, std=self.std)
+        image = normalize(image)
+
         if target is None:
             return image, None
         target = target.copy()
-        
+
         if isinstance(image, jt.Var):
             h, w = image.shape[-2:]
         else:
             h, w = image.shape[-2:]
-            
+
         if "boxes" in target:
             boxes = target["boxes"]
             boxes = box_xyxy_to_cxcywh(boxes)
