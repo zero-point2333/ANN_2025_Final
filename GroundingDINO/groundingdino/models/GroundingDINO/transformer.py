@@ -118,6 +118,7 @@ class Transformer(nn.Module):
             feature_fusion_layer=feature_fusion_layer,
             use_checkpoint=use_checkpoint,
             use_transformer_ckpt=use_transformer_ckpt,
+            enc_layer_share=True,
         )
 
         # choose decoder layer type
@@ -163,7 +164,7 @@ class Transformer(nn.Module):
         self.embed_init_tgt = embed_init_tgt
         if (two_stage_type != "no" and embed_init_tgt) or (two_stage_type == "no"):
             self.tgt_embed = nn.Embedding(self.num_queries, d_model)
-            nn.init.normal_(self.tgt_embed.weight)
+            self.tgt_embed.weight.normal_()
         else:
             self.tgt_embed = None
 
@@ -194,7 +195,7 @@ class Transformer(nn.Module):
             if isinstance(m, MSDeformAttn):
                 m._reset_parameters()
         if self.num_feature_levels > 1 and self.level_embed is not None:
-            nn.init.normal_(self.level_embed)
+            self.level_embed.normal_()
 
     def get_valid_ratio(self, mask):
         _, H, W = mask.shape
@@ -605,7 +606,7 @@ class TransformerDecoder(nn.Module):
     ):
         super().__init__()
         if num_layers > 0:
-            self.layers = _get_clones(decoder_layer, num_layers)
+            self.layers = _get_clones(decoder_layer, num_layers, layer_share=True)
         else:
             self.layers = []
         self.num_layers = num_layers
@@ -820,12 +821,12 @@ class DeformableTransformerDecoderLayer(nn.Module):
 
         # cross attention text
         if use_text_cross_attention:
-            self.ca_text = nn.MultiheadAttention(d_model, n_heads, dropout=dropout)
+            self.ca_text = jt.attention.MultiheadAttention(d_model, n_heads, dropout=dropout)
             self.catext_dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
             self.catext_norm = nn.LayerNorm(d_model)
 
         # self attention
-        self.self_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout)
+        self.self_attn = jt.attention.MultiheadAttention(d_model, n_heads, dropout=dropout)
         self.dropout2 = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.norm2 = nn.LayerNorm(d_model)
 

@@ -1,5 +1,6 @@
 from typing import Tuple, List, Any
 
+import os
 import cv2
 import numpy as np
 import supervision as sv
@@ -71,11 +72,16 @@ def preprocess_caption(caption: str) -> str:
     return result + "."
 
 
-def load_model(model_config_path: str, model_checkpoint_path: str, device: str = "cuda"):
+def load_model(model_config_path: str, model_checkpoint_path: str, device: str = "cuda", offline_mode=False):
     _set_jittor_device(device)
 
     args = SLConfig.fromfile(model_config_path)
     args.device = device
+
+    # 新增：设置离线模式
+    if offline_mode:
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        os.environ["HF_DATASETS_OFFLINE"] = "1"
 
     model = build_model(args)
 

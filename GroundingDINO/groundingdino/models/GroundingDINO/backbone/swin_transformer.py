@@ -541,6 +541,7 @@ class SwinTransformer(nn.Module):
         out_indices=(0, 1, 2, 3),
         frozen_stages=-1,
         dilation=False,
+        use_checkpoint=False,
     ):
         super().__init__()
 

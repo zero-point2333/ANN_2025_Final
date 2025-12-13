@@ -6,3 +6,4 @@ opencv-python==4.5.5.64
 supervision==0.25.1
 pycocotools==2.0.7
 transformers==4.46.3
+modelscope==1.8.1

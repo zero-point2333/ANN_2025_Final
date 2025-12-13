@@ -102,10 +102,11 @@ class GroundingDINO(nn.Module):
         self.dn_labelbook_size = dn_labelbook_size
 
         # bert
+        # init tokenizer
         self.tokenizer = get_tokenlizer.get_tokenlizer(text_encoder_type)
         self.bert = get_tokenlizer.get_pretrained_language_model(text_encoder_type)
-        self.bert.pooler.dense.weight.requires_grad = False
-        self.bert.pooler.dense.bias.requires_grad = False
+        # self.bert.pooler.dense.weight.requires_grad = False
+        # self.bert.pooler.dense.bias.requires_grad = False
         self.bert = BertModelWarper(bert_model=self.bert)
 
         self.feat_map = nn.Linear(self.bert.config.hidden_size, self.hidden_dim, bias=True)
