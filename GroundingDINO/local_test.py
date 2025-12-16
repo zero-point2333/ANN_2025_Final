@@ -1,7 +1,7 @@
 from groundingdino.util.inference import load_model, load_image, predict, annotate
 import cv2
 
-model = load_model("groundingdino/config/GroundingDINO_SwinT_OGC.py", "../04-06-segment-anything/weights/groundingdino_swint_ogc.pth", offline_mode=True)
+model = load_model("groundingdino/config/GroundingDINO_SwinT_OGC.py", "weights/groundingdino_swint_ogc.pth", offline_mode=True)
 IMAGE_PATH = ".asset/cat_dog.jpeg"
 TEXT_PROMPT = "chair . person . dog ."
 BOX_TRESHOLD = 0.35

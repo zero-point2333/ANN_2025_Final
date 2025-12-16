@@ -87,7 +87,7 @@ class BertModelWarper(nn.Module):
         else:
             raise ValueError("You have to specify either input_ids or inputs_embeds")
 
-        device = input_ids.device if input_ids is not None else inputs_embeds.device
+        device = None  # Jittor doesn't have device attribute
 
         # past_key_values_length
         past_key_values_length = (
@@ -96,16 +96,18 @@ class BertModelWarper(nn.Module):
 
         if attention_mask is None:
             attention_mask = jt.ones(
-                (batch_size, seq_length + past_key_values_length), device=device
+                (batch_size, seq_length + past_key_values_length)
             )
         if token_type_ids is None:
-            token_type_ids = jt.zeros(input_shape, dtype=jt.long, device=device)
+            token_type_ids = jt.zeros(input_shape, dtype=jt.long)
 
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
         extended_attention_mask = self.get_extended_attention_mask(
-            attention_mask, input_shape, device
+            attention_mask, input_shape
         )
+        # Ensure attention mask is float32 to match query dtype
+        extended_attention_mask = extended_attention_mask.float()
 
         # If a 2D or 3D attention mask is provided for the cross-attention
         # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
@@ -113,7 +115,7 @@ class BertModelWarper(nn.Module):
             encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.shape
             encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
             if encoder_attention_mask is None:
-                encoder_attention_mask = jt.ones(encoder_hidden_shape, device=device)
+                encoder_attention_mask = jt.ones(encoder_hidden_shape)
             encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)
         else:
             encoder_extended_attention_mask = None
@@ -127,20 +129,36 @@ class BertModelWarper(nn.Module):
         # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
         head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
 
+        # Convert Jittor inputs to PyTorch tensors for BERT embeddings
+        import torch
+        input_ids_pt = torch.from_numpy(input_ids.numpy()) if input_ids is not None else None
+        position_ids_pt = torch.from_numpy(position_ids.numpy()) if position_ids is not None else None
+        token_type_ids_pt = torch.from_numpy(token_type_ids.numpy()) if token_type_ids is not None else None
+        inputs_embeds_pt = torch.from_numpy(inputs_embeds.numpy()) if inputs_embeds is not None else None
+
         embedding_output = self.embeddings(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            token_type_ids=token_type_ids,
-            inputs_embeds=inputs_embeds,
+            input_ids=input_ids_pt,
+            position_ids=position_ids_pt,
+            token_type_ids=token_type_ids_pt,
+            inputs_embeds=inputs_embeds_pt,
             past_key_values_length=past_key_values_length,
         )
 
+        # Convert back to Jittor
+        # embedding_output = jt.array(embedding_output.detach().numpy())
+
+        # Convert attention_mask to PyTorch tensor for encoder
+        extended_attention_mask_pt = torch.from_numpy(extended_attention_mask.numpy()) if extended_attention_mask is not None else None
+        head_mask_pt = head_mask  # head_mask is already a list from PyTorch method
+        encoder_hidden_states_pt = torch.from_numpy(encoder_hidden_states.numpy()) if encoder_hidden_states is not None else None
+        encoder_extended_attention_mask_pt = torch.from_numpy(encoder_extended_attention_mask.numpy()) if encoder_extended_attention_mask is not None else None
+
         encoder_outputs = self.encoder(
             embedding_output,
-            attention_mask=extended_attention_mask,
-            head_mask=head_mask,
-            encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=encoder_extended_attention_mask,
+            attention_mask=extended_attention_mask_pt,
+            head_mask=head_mask_pt,
+            encoder_hidden_states=encoder_hidden_states_pt,
+            encoder_attention_mask=encoder_extended_attention_mask_pt,
             past_key_values=past_key_values,
             use_cache=use_cache,
             output_attentions=output_attentions,
@@ -148,7 +166,16 @@ class BertModelWarper(nn.Module):
             return_dict=return_dict,
         )
         sequence_output = encoder_outputs[0]
-        pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
+
+        # Convert back to Jittor
+        sequence_output = jt.array(sequence_output.detach().numpy())
+        
+        # Convert to PyTorch for pooler
+        sequence_output_pt = torch.from_numpy(sequence_output.numpy())
+        pooled_output = self.pooler(sequence_output_pt) if self.pooler is not None else None
+        
+        # Convert pooled_output back to Jittor
+        pooled_output = jt.array(pooled_output.detach().numpy()) if pooled_output is not None else None
 
         if not return_dict:
             return (sequence_output, pooled_output) + encoder_outputs[1:]
@@ -185,7 +212,7 @@ def generate_masks_with_special_tokens(tokenized, special_tokens_list, tokenizer
     input_ids = tokenized["input_ids"]
     bs, num_token = input_ids.shape
     # special_tokens_mask: bs, num_token. 1 for special tokens. 0 for normal tokens
-    special_tokens_mask = jt.zeros((bs, num_token), device=input_ids.device).bool()
+    special_tokens_mask = jt.zeros((bs, num_token)).bool()
     for special_token in special_tokens_list:
         special_tokens_mask |= input_ids == special_token
 
@@ -194,9 +221,9 @@ def generate_masks_with_special_tokens(tokenized, special_tokens_list, tokenizer
 
     # generate attention mask and positional ids
     attention_mask = (
-        jt.eye(num_token, device=input_ids.device).bool().unsqueeze(0).repeat(bs, 1, 1)
+        jt.diag(jt.ones(num_token)).bool().unsqueeze(0).repeat(bs, 1, 1)
     )
-    position_ids = jt.zeros((bs, num_token), device=input_ids.device)
+    position_ids = jt.zeros((bs, num_token))
     previous_col = 0
     for i in range(idxs.shape[0]):
         row, col = idxs[i]
@@ -229,7 +256,7 @@ def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_token
     input_ids = tokenized["input_ids"]
     bs, num_token = input_ids.shape
     # special_tokens_mask: bs, num_token. 1 for special tokens. 0 for normal tokens
-    special_tokens_mask = jt.zeros((bs, num_token), device=input_ids.device).bool()
+    special_tokens_mask = jt.zeros((bs, num_token)).bool()
     for special_token in special_tokens_list:
         special_tokens_mask |= input_ids == special_token
 
@@ -238,9 +265,9 @@ def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_token
 
     # generate attention mask and positional ids
     attention_mask = (
-        jt.eye(num_token, device=input_ids.device).bool().unsqueeze(0).repeat(bs, 1, 1)
+        jt.diag(jt.ones(num_token)).bool().unsqueeze(0).repeat(bs, 1, 1)
     )
-    position_ids = jt.zeros((bs, num_token), device=input_ids.device)
+    position_ids = jt.zeros((bs, num_token))
     cate_to_token_mask_list = [[] for _ in range(bs)]
     previous_col = 0
     for i in range(idxs.shape[0]):
@@ -251,9 +278,9 @@ def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_token
         else:
             attention_mask[row, previous_col + 1 : col + 1, previous_col + 1 : col + 1] = True
             position_ids[row, previous_col + 1 : col + 1] = jt.arange(
-                0, col - previous_col, device=input_ids.device
+                0, col - previous_col
             )
-            c2t_maski = jt.zeros((num_token), device=input_ids.device).bool()
+            c2t_maski = jt.zeros((num_token)).bool()
             c2t_maski[previous_col + 1 : col] = True
             cate_to_token_mask_list[row].append(c2t_maski)
         previous_col = col

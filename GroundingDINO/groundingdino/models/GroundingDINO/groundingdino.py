@@ -244,9 +244,9 @@ class GroundingDINO(nn.Module):
             captions = [t["caption"] for t in targets]
 
         # encoder texts
-        tokenized = self.tokenizer(captions, padding="longest", return_tensors="pt").to(
-            samples.device
-        )
+        tokenized = self.tokenizer(captions, padding="longest", return_tensors="pt")
+        # Convert to Jittor tensors
+        tokenized = {k: jt.array(v.numpy()) for k, v in tokenized.items()}
         (
             text_self_attention_masks,
             position_ids,
@@ -276,7 +276,7 @@ class GroundingDINO(nn.Module):
         bert_output = self.bert(**tokenized_for_encoder)  # bs, 195, 768
 
         encoded_text = self.feat_map(bert_output["last_hidden_state"])  # bs, 195, d_model
-        text_token_mask = tokenized.attention_mask.bool()  # bs, 195
+        text_token_mask = tokenized_for_encoder["attention_mask"].bool()  # bs, 195
         # text_token_mask: True for nomask, False for mask
         # text_self_attention_masks: True for nomask, False for mask
 
@@ -305,19 +305,19 @@ class GroundingDINO(nn.Module):
         masks = []
         for l, feat in enumerate(self.features):
             src, mask = feat.decompose()
-            srcs.append(self.input_proj[l](src))
+            srcs.append(self.input_proj[l](jt.array(src)))
             masks.append(mask)
             assert mask is not None
         if self.num_feature_levels > len(srcs):
             _len_srcs = len(srcs)
             for l in range(_len_srcs, self.num_feature_levels):
                 if l == _len_srcs:
-                    src = self.input_proj[l](self.features[-1].tensors)
+                    src = self.input_proj[l](jt.array(self.features[-1].tensors))
                 else:
                     src = self.input_proj[l](srcs[-1])
                 m = samples.mask
-                mask = nn.interpolate(m[None].float(), size=src.shape[-2:]).bool()[0]
-                pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype)
+                mask = nn.interpolate(jt.array(m)[None].float(), size=src.shape[-2:]).bool()[0]
+                pos_l = self.backbone.position_embedding(NestedTensor(src.numpy(), mask.numpy())).to(src.dtype)
                 srcs.append(src)
                 masks.append(mask)
                 self.poss.append(pos_l)

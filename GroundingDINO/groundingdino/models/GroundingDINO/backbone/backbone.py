@@ -139,14 +139,15 @@ class BackboneBase(nn.Module):
         self.num_channels = num_channels
 
     def execute(self, tensor_list: NestedTensor):
-        xs = self.body(tensor_list.tensors)
+        tensors = jt.array(tensor_list.tensors)  # Convert numpy to Jittor Var
+        xs = self.body(tensors)
         out: Dict[str, NestedTensor] = {}
         for name, x in xs.items():
             m = tensor_list.mask
             assert m is not None
             # Jittor的interpolate用法
-            mask = nn.interpolate(m.float().unsqueeze(0), size=x.shape[-2:]).to(jt.bool).squeeze(0)
-            out[name] = NestedTensor(x, mask)
+            mask = nn.interpolate(jt.array(m).float().unsqueeze(0), size=x.shape[-2:]).to(jt.bool).squeeze(0)
+            out[name] = NestedTensor(x.numpy(), mask.numpy())
         return out
 
 

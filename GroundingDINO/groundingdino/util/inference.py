@@ -7,12 +7,28 @@ import supervision as sv
 from PIL import Image
 import bisect
 import jittor as jt
+import torch
 
 import groundingdino.datasets.transforms as T
 from groundingdino.models import build_model
 from groundingdino.util.misc import clean_state_dict
 from groundingdino.util.slconfig import SLConfig
 from groundingdino.util.utils import get_phrases_from_posmap
+
+
+def convert_pytorch_to_jittor(state_dict):
+    """
+    Recursively convert PyTorch tensors in state_dict to Jittor Vars.
+    """
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if isinstance(v, torch.Tensor):
+            new_state_dict[k] = jt.array(v.detach().numpy())
+        elif isinstance(v, dict):
+            new_state_dict[k] = convert_pytorch_to_jittor(v)
+        else:
+            new_state_dict[k] = v
+    return new_state_dict
 
 
 def _set_jittor_device(device: str) -> None:
@@ -93,14 +109,18 @@ def load_model(model_config_path: str, model_checkpoint_path: str, device: str =
             state_dict = ckpt
 
         state_dict = clean_state_dict(state_dict)
+        state_dict = convert_pytorch_to_jittor(state_dict)
+        
+        # Filter out BERT parameters since BERT is wrapped as PyTorch module
+        filtered_state_dict = {k: v for k, v in state_dict.items() if not k.startswith('bert.')}
 
         if hasattr(model, "load_state_dict"):
             try:
-                model.load_state_dict(state_dict, strict=False)
+                model.load_state_dict(filtered_state_dict, strict=False)
             except TypeError:
-                model.load_state_dict(state_dict)
+                model.load_state_dict(filtered_state_dict)
         elif hasattr(model, "load_parameters"):
-            model.load_parameters(state_dict)
+            model.load_parameters(filtered_state_dict)
 
     if hasattr(model, "eval"):
         model.eval()
@@ -141,6 +161,12 @@ def predict(
 
     # 这里直接使用传入的 model 和 image
     with jt.no_grad():
+        # Convert image to Jittor Var
+        if not isinstance(image, jt.Var):
+            if hasattr(image, 'convert'):  # PIL Image
+                import numpy as np
+                image = np.array(image)
+            image = jt.array(image)
         outputs = model(image[None], captions=[caption])
 
     # outputs["pred_logits"]: (nq, vocab_dim)
