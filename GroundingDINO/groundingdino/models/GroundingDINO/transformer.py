@@ -193,7 +193,7 @@ class Transformer(nn.Module):
                 nn.init.xavier_uniform_(p)
         for m in self.modules():
             if isinstance(m, MSDeformAttn):
-                m._reset_parameters()
+                m.init_weights()
         if self.num_feature_levels > 1 and self.level_embed is not None:
             self.level_embed.normal_()
 
