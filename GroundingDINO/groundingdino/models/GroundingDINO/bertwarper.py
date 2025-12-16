@@ -8,7 +8,6 @@
 import jittor as jt
 import jittor.nn as F
 from jittor import nn
-from transformers import BertConfig, BertModel, BertPreTrainedModel
 from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
 
 

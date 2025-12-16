@@ -1,35 +1,45 @@
-FROM nvidia/cuda:12.1-runtime-ubuntu20.04
+FROM jittor/jittor-cuda:11.1-16.04
 ARG DEBIAN_FRONTEND=noninteractive
 
+# 设置环境变量
 ENV CUDA_HOME=/usr/local/cuda \
-     TORCH_CUDA_ARCH_LIST="6.0 6.1 7.0 7.5 8.0 8.6+PTX" \
-     SETUPTOOLS_USE_DISTUTILS=stdlib
+    PYTHONUNBUFFERED=1 \
+    WORKDIR=/workspace
 
-RUN conda update conda -y
-
-# Install libraries in the brand new image. 
+# 安装系统依赖
 RUN apt-get -y update && apt-get install -y --no-install-recommends \
-         wget \
-         build-essential \
-         git \
-         python3-opencv \
-         ca-certificates && \
+        wget \
+        build-essential \
+        curl \
+        ca-certificates \
+        libgl1-mesa-glx \
+        libglib2.0-0 \
+        python3-opencv && \
     rm -rf /var/lib/apt/lists/*
 
-# Set the working directory for all the subsequent Dockerfile instructions.
-WORKDIR /opt/program
+# 设置工作目录
+WORKDIR $WORKDIR
 
-RUN git clone https://github.com/zero-point2333/ANN_2025_Final.git
+# 复制本地GroundingDINO项目到容器
+COPY GroundingDINO/ ./GroundingDINO/
 
-RUN mkdir weights ; cd weights ; wget -q https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth ; cd ..
+# 安装Python依赖
+RUN cd GroundingDINO && \
+    if [ -f requirements.txt ]; then \
+        pip install -r requirements.txt; \
+    fi
 
-RUN conda install -c "nvidia/label/cuda-12.1.1" cuda -y
-ENV CUDA_HOME=$CONDA_PREFIX
+# 安装GroundingDINO包
+RUN cd GroundingDINO && \
+    python setup.py develop || \
+    pip install -e . || \
+    python -m pip install .
 
-ENV PATH=/usr/local/cuda/bin:$PATH
+# 复制测试文件
+COPY local_test.py .
 
-RUN cd GroundingDINO/ && python -m pip install .
+# 设置Python路径
+ENV PYTHONPATH="${PYTHONPATH}:$WORKDIR/GroundingDINO"
 
-COPY docker_test.py docker_test.py
-
-CMD [ "python", "docker_test.py" ]
+# 运行测试
+CMD ["python", "local_test.py"]

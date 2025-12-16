@@ -115,6 +115,7 @@ def resize(image, target, size, max_size=None):
             return get_size_with_aspect_ratio(image_size, size, max_size)
 
     size = get_size(image.size, size, max_size)
+    # PIL expects (width, height)
     rescaled_image = image.resize(size[::-1], resample=PIL.Image.BILINEAR)
 
     if target is None:
@@ -148,6 +149,7 @@ def resize(image, target, size, max_size=None):
 
 
 def pad(image, target, padding):
+    # assumes that we only pad on the bottom right corners
     padded_image = PIL.ImageOps.expand(image, border=(0, 0, padding[0], padding[1]))
     if target is None:
         return padded_image, None
@@ -276,8 +278,18 @@ class RandomSelect(object):
 class ToTensor(object):
     def __call__(self, img, target):
         if isinstance(img, PIL.Image.Image):
-            to_tensor = T.ToTensor()
-            img = to_tensor(img)
+            img = T.to_tensor(img)
+        return img, target
+
+
+class RandomErasing(object):
+    def __init__(self, *args, **kwargs):
+        # Jittor 目前没有 RandomErasing，可以手动实现或使用其他增强方法
+        # 这里先保持空实现，需要时再补充
+        pass
+
+    def __call__(self, img, target):
+        # TODO: 实现 Jittor 版本的 RandomErasing
         return img, target
 
 
@@ -288,12 +300,9 @@ class Normalize(object):
 
     def __call__(self, image, target=None):
         if isinstance(image, PIL.Image.Image):
-            to_tensor = T.ToTensor()
-            image = to_tensor(image)
-
-        normalize = T.ImageNormalize(mean=self.mean, std=self.std)
-        image = normalize(image)
-
+            image = T.to_tensor(image)
+        
+        image = T.image_normalize(image, mean=self.mean, std=self.std)
         if target is None:
             return image, None
         target = target.copy()

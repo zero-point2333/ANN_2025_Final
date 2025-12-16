@@ -4,6 +4,11 @@ import jittor as jt
 from jittor import nn
 from transformers import AutoTokenizer, AutoConfig
 
+# 定义 ModelScope 模型映射表（Hugging Face ID -> ModelScope ID）
+MODELSCOPE_MAPPING = {
+    "bert-base-uncased": "google-bert/bert-base-uncased",  # ModelScope 官方镜像
+    "roberta-base": "roberta-base"  # 根据实际可用模型调整
+}
 
 def get_tokenlizer(text_encoder_type):
     """
@@ -23,7 +28,16 @@ def get_tokenlizer(text_encoder_type):
             )
     print("final text_encoder_type: {}".format(text_encoder_type))
 
-    tokenizer = AutoTokenizer.from_pretrained(text_encoder_type)
+    # 新增：检查是否为 ModelScope 模型ID
+    model_id = MODELSCOPE_MAPPING.get(text_encoder_type, text_encoder_type)
+    
+    # 新增：下载模型到本地缓存（如果尚未下载）
+    local_dir = os.path.join(os.path.expanduser("~"), ".cache", "modelscope", "hub", "models", model_id)
+    if not os.path.exists(local_dir):
+        raise EnvironmentError("local model not found!")
+    
+    # 修改：从本地路径加载tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(local_dir)
     return tokenizer
 
 
@@ -66,15 +80,22 @@ class JittorTextEncoder(nn.Module):
                     nn.Linear(hidden_size, hidden_size),
                 )
             )
+        self.pooler = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh()
+        )
         self.layers = nn.ModuleList(layers)
 
     @classmethod
     def from_pretrained(cls, text_encoder_type):
-        """
-        保留与 BertModel.from_pretrained 相同的静态接口签名，
-        但内部只用 AutoConfig 读取超参数，不加载 torch 权重。
-        """
-        cfg = AutoConfig.from_pretrained(text_encoder_type)
+        # 新增：使用 ModelScope 映射
+        model_id = MODELSCOPE_MAPPING.get(text_encoder_type, text_encoder_type)
+        local_dir = os.path.join(os.path.expanduser("~"), ".cache", "modelscope", "hub", "models", model_id)
+        if not os.path.exists(local_dir):
+            raise EnvironmentError("local model not found!")
+        
+        # 修改：从本地路径加载config
+        cfg = AutoConfig.from_pretrained(local_dir)
         return cls(cfg)
 
     def execute(self, input_ids=None, attention_mask=None, **kwargs):
