@@ -7,6 +7,7 @@
 
 import copy
 import math
+import numpy as np
 
 import jittor as jt
 import jittor.nn as nn
@@ -37,7 +38,7 @@ def get_sine_pos_embed(
         pos_embed (jt.Var): shape: [..., n*num_pos_feats].
     """
     scale = 2 * math.pi
-    dim_t = jt.arange(num_pos_feats, dtype=jt.float32, device=pos_tensor.device)
+    dim_t = jt.arange(num_pos_feats, dtype=jt.float32)
     dim_t = temperature ** (2 * (dim_t // 2) / num_pos_feats)
 
     def sine_func(x: jt.Var):
@@ -68,14 +69,17 @@ def gen_encoder_output_proposals(
     N_, S_, C_ = memory.shape
     proposals = []
     _cur = 0
-    for lvl, (H_, W_) in enumerate(spatial_shapes):
-        mask_flatten_ = memory_padding_mask[:, _cur : (_cur + H_ * W_)].view(N_, H_, W_, 1)
-        valid_H = jt.sum(~mask_flatten_[:, :, 0, 0], 1)
-        valid_W = jt.sum(~mask_flatten_[:, 0, :, 0], 1)
+    spatial_shapes_np = np.array(spatial_shapes)
+    for lvl, (H_, W_) in enumerate(spatial_shapes_np):
+        H_int, W_int = int(H_), int(W_)
+        mask_flatten_ = memory_padding_mask[:, _cur : (_cur + H_int * W_int)].view(N_, H_int, W_int, 1)
+        inv_mask = jt.logical_not(mask_flatten_)
+        valid_H = jt.sum(inv_mask[:, :, 0, 0], 1)
+        valid_W = jt.sum(inv_mask[:, 0, :, 0], 1)
 
         grid_y, grid_x = jt.meshgrid(
-            jt.linspace(0, H_ - 1, H_, dtype=jt.float32, device=memory.device),
-            jt.linspace(0, W_ - 1, W_, dtype=jt.float32, device=memory.device),
+            jt.linspace(0, H_int - 1, H_int).float32(),
+            jt.linspace(0, W_int - 1, W_int).float32(),
         )
         grid = jt.concat([grid_x.unsqueeze(-1), grid_y.unsqueeze(-1)], -1)  # H_, W_, 2
 
@@ -89,19 +93,18 @@ def gen_encoder_output_proposals(
 
         proposal = jt.concat((grid, wh), -1).view(N_, -1, 4)
         proposals.append(proposal)
-        _cur += H_ * W_
+        _cur += H_int * W_int
 
     output_proposals = jt.concat(proposals, 1)
-    output_proposals_valid = ((output_proposals > 0.01) & (output_proposals < 0.99)).all(
-        -1, keepdims=True
-    )
+    output_proposals_valid = (output_proposals > 0.01) & (output_proposals < 0.99)
+    output_proposals_valid = output_proposals_valid.float32().prod(dim=-1).unsqueeze(-1).bool()
     output_proposals = jt.log(output_proposals / (1 - output_proposals))  # unsigmoid
     output_proposals = output_proposals.masked_fill(memory_padding_mask.unsqueeze(-1), float("inf"))
-    output_proposals = output_proposals.masked_fill(~output_proposals_valid, float("inf"))
+    output_proposals = output_proposals.masked_fill(jt.logical_not(output_proposals_valid), float("inf"))
 
     output_memory = memory
     output_memory = output_memory.masked_fill(memory_padding_mask.unsqueeze(-1), float(0))
-    output_memory = output_memory.masked_fill(~output_proposals_valid, float(0))
+    output_memory = output_memory.masked_fill(jt.logical_not(output_proposals_valid), float(0))
 
     return output_memory, output_proposals
 
@@ -114,10 +117,9 @@ class RandomBoxPerturber:
 
     def __call__(self, refanchors: Var) -> Var:
         nq, bs, query_dim = refanchors.shape
-        device = refanchors.device
 
         noise_raw = jt.rand(refanchors.shape)
-        noise_scale = self.noise_scale.to(device)[:query_dim]
+        noise_scale = self.noise_scale[:query_dim]
 
         new_refanchors = refanchors * (1 + (noise_raw - 0.5) * noise_scale)
         return new_refanchors.clamp(0, 1)
@@ -191,7 +193,7 @@ def _get_activation_fn(activation, d_model=256, batch_dim=0):
 
 def gen_sineembed_for_position(pos_tensor):
     scale = 2 * math.pi
-    dim_t = jt.arange(128, dtype=jt.float32, device=pos_tensor.device)
+    dim_t = jt.arange(128, dtype=jt.float32)
     dim_t = 10000 ** (2 * (dim_t // 2) / 128)
     x_embed = pos_tensor[:, :, 0] * scale
     y_embed = pos_tensor[:, :, 1] * scale
@@ -245,10 +247,22 @@ class ContrastiveEmbed(nn.Module):
         text_token_mask = text_dict["text_token_mask"]
 
         res = x @ y.transpose(-1, -2)
-        res = res.masked_fill(~text_token_mask[:, None, :], float("-inf"))
+        text_len = res.shape[-1]
+        mask_base = jt.logical_not(text_token_mask)[..., :text_len]
+        if mask_base.shape[-1] < text_len:
+            pad = jt.zeros((mask_base.shape[0], text_len - mask_base.shape[-1]), dtype=mask_base.dtype)
+            mask_base = jt.concat([mask_base, pad], -1)
+        repeat_len = int(res.shape[1])
+        mask_np = np.repeat(mask_base.numpy()[:, None, :], repeat_len, axis=1)
+        mask = jt.array(mask_np)
+        # debug once
+        if not hasattr(self, "_debug_shape_logged"):
+            print("Contrastive mask/res shapes:", mask.shape, res.shape, flush=True)
+            self._debug_shape_logged = True
+        res = res.masked_fill(mask, float("-inf"))
 
         # padding to max_text_len
-        new_res = jt.full((*res.shape[:-1], self.max_text_len), float("-inf"), device=res.device)
+        new_res = jt.full((*res.shape[:-1], self.max_text_len), float("-inf"), dtype=res.dtype)
         new_res[..., : res.shape[-1]] = res
 
         return new_res

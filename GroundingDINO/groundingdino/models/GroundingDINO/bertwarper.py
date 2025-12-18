@@ -131,9 +131,11 @@ class BertModelWarper(nn.Module):
 
         # Convert Jittor inputs to PyTorch tensors for BERT embeddings
         import torch
-        input_ids_pt = torch.from_numpy(input_ids.numpy()) if input_ids is not None else None
-        position_ids_pt = torch.from_numpy(position_ids.numpy()) if position_ids is not None else None
-        token_type_ids_pt = torch.from_numpy(token_type_ids.numpy()) if token_type_ids is not None else None
+        input_ids_pt = torch.from_numpy(input_ids.numpy()).long() if input_ids is not None else None
+        position_ids_pt = torch.from_numpy(position_ids.numpy()).long() if position_ids is not None else None
+        token_type_ids_pt = torch.from_numpy(token_type_ids.numpy()).long() if token_type_ids is not None else None
+        if token_type_ids_pt is not None:
+            token_type_ids_pt.clamp_(0, max(0, self.config.type_vocab_size - 1))
         inputs_embeds_pt = torch.from_numpy(inputs_embeds.numpy()) if inputs_embeds is not None else None
 
         embedding_output = self.embeddings(
@@ -287,6 +289,8 @@ def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_token
 
     cate_to_token_mask_list = [
         jt.stack(cate_to_token_mask_listi, dim=0)
+        if len(cate_to_token_mask_listi) > 0
+        else jt.zeros((0, num_token)).bool()
         for cate_to_token_mask_listi in cate_to_token_mask_list
     ]
 

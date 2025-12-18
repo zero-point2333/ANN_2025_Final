@@ -227,18 +227,22 @@ class BiMultiHeadAttention(nn.Module):
 
         # mask vison for language
         if attention_mask_v is not None:
-            attention_mask_v = (
-                attention_mask_v[:, None, None, :].repeat(1, self.num_heads, 1, 1).flatten(0, 1)
-            )
+            bs_mask, _, src_len_mask = attention_mask_v.shape[0], attention_mask_v.shape[1], attention_mask_v.shape[-1]
+            _, dim1, dim2 = attn_weights_l.shape
+            attention_mask_v = attention_mask_v[:, None, None, :].repeat(
+                1, self.num_heads, dim1, 1
+            ).reshape(bs_mask * self.num_heads, dim1, dim2)
             attn_weights_l = attn_weights_l.masked_fill(attention_mask_v, float("-inf"))
 
         attn_weights_l = nn.softmax(attn_weights_l, dim=-1)
 
         # mask language for vision
         if attention_mask_l is not None:
-            attention_mask_l = (
-                attention_mask_l[:, None, None, :].repeat(1, self.num_heads, 1, 1).flatten(0, 1)
-            )
+            bs_mask, _, src_len_mask = attention_mask_l.shape[0], attention_mask_l.shape[1], attention_mask_l.shape[-1]
+            _, dim1, dim2 = attn_weights.shape
+            attention_mask_l = attention_mask_l[:, None, None, :].repeat(
+                1, self.num_heads, dim1, 1
+            ).reshape(bs_mask * self.num_heads, dim1, dim2)
             attn_weights = attn_weights.masked_fill(attention_mask_l, float("-inf"))
         attn_weights_v = nn.softmax(attn_weights, dim=-1)
 

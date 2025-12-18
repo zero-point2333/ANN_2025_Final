@@ -17,11 +17,13 @@
 # ------------------------------------------------------------------------
 
 from typing import Optional
+import numpy as np
 
 import jittor as jt
 import jittor.nn as nn
 from jittor import Var
 
+from groundingdino.util.debug_tools import debug_enabled, log_tensor, log_text
 from groundingdino.util.misc import inverse_sigmoid
 
 from .fuse_modules import BiAttentionBlock
@@ -198,9 +200,11 @@ class Transformer(nn.Module):
             self.level_embed.normal_()
 
     def get_valid_ratio(self, mask):
+        mask = mask.bool()
+        inv_mask = jt.logical_not(mask)
         _, H, W = mask.shape
-        valid_H = jt.sum(~mask[:, :, 0], 1)
-        valid_W = jt.sum(~mask[:, 0, :], 1)
+        valid_H = jt.sum(inv_mask[:, :, 0], 1)
+        valid_W = jt.sum(inv_mask[:, 0, :], 1)
         valid_ratio_h = valid_H.float() / H
         valid_ratio_w = valid_W.float() / W
         valid_ratio = jt.stack([valid_ratio_w, valid_ratio_h], -1)
@@ -219,6 +223,29 @@ class Transformer(nn.Module):
             - tgt: [bs, num_dn, d_model]. None in infer
 
         """
+        debug_mode = debug_enabled()
+        if debug_mode:
+            log_text(
+                f"Transformer.execute: levels={len(srcs)} two_stage={self.two_stage_type} num_queries={self.num_queries}",
+                force=True,
+            )
+        # Ensure masks are jittor Vars (backbone emits numpy arrays)
+        masks = [
+            m if isinstance(m, Var) else jt.array(m)
+            for m in masks
+        ]
+        text_token_mask = text_dict["text_token_mask"].bool()
+        text_dict["text_token_mask"] = text_token_mask
+        text_attention_mask = jt.logical_not(text_token_mask)
+        if debug_mode:
+            log_tensor("transformer.text_token_mask", text_token_mask, force=True)
+
+        # Fallback to single-stage path in CPU/strict environments
+        if self.two_stage_type == "standard":
+            self.two_stage_type = "no"
+            if getattr(self, "refpoint_embed", None) is None:
+                self.init_ref_points(self.num_queries)
+
         # prepare input for encoder
         src_flatten = []
         mask_flatten = []
@@ -228,6 +255,10 @@ class Transformer(nn.Module):
             bs, c, h, w = src.shape
             spatial_shape = (h, w)
             spatial_shapes.append(spatial_shape)
+            if debug_mode:
+                log_tensor(f"encoder.src[{lvl}]", src, force=True)
+                log_tensor(f"encoder.mask[{lvl}]", mask, force=True)
+                log_tensor(f"encoder.pos_embed[{lvl}]", pos_embed, force=True)
 
             src = src.flatten(2).transpose(1, 2)  # bs, hw, c
             mask = mask.flatten(1)  # bs, hw
@@ -247,6 +278,11 @@ class Transformer(nn.Module):
             (jt.zeros((1,), dtype=jt.int64), spatial_shapes.prod(1).cumsum(0)[:-1])
         )
         valid_ratios = jt.stack([self.get_valid_ratio(m) for m in masks], 1)
+        if debug_mode:
+            log_tensor("encoder.src_flatten", src_flatten, force=True)
+            log_tensor("encoder.mask_flatten", mask_flatten, force=True)
+            log_tensor("encoder.lvl_pos_embed_flatten", lvl_pos_embed_flatten, force=True)
+            log_tensor("encoder.valid_ratios", valid_ratios, force=True)
 
         # two stage
         enc_topk_proposals = enc_refpoint_embed = None
@@ -262,8 +298,8 @@ class Transformer(nn.Module):
             valid_ratios=valid_ratios,
             key_padding_mask=mask_flatten,
             memory_text=text_dict["encoded_text"],
-            text_attention_mask=~text_dict["text_token_mask"],
-            # we ~ the mask . False means use the token; True means pad the token
+            text_attention_mask=text_attention_mask,
+            # False means use the token; True means pad the token
             position_ids=text_dict["position_ids"],
             text_self_attention_masks=text_dict["text_self_attention_masks"],
         )
@@ -276,6 +312,9 @@ class Transformer(nn.Module):
         # - enc_intermediate_refpoints: None or (nenc+1, bs, nq, c) or (nenc, bs, nq, c)
         #########################################################
         text_dict["encoded_text"] = memory_text
+        if debug_mode:
+            log_tensor("encoder.memory", memory, force=True)
+            log_tensor("encoder.memory_text", memory_text, force=True)
         # if os.environ.get("SHILONG_AMP_INFNAN_DEBUG") == '1':
         #     if memory.isnan().any() | memory.isinf().any():
         #         import ipdb; ipdb.set_trace()
@@ -356,6 +395,9 @@ class Transformer(nn.Module):
         # - tgt: bs, NQ, d_model
         # - refpoint_embed(unsigmoid): bs, NQ, d_model
         #########################################################
+        if debug_mode:
+            log_tensor("decoder.tgt_pre", tgt, force=True)
+            log_tensor("decoder.refpoint_embed_pre", refpoint_embed, force=True)
 
         #########################################################
         # Begin Decoder
@@ -371,8 +413,8 @@ class Transformer(nn.Module):
             valid_ratios=valid_ratios,
             tgt_mask=attn_mask,
             memory_text=text_dict["encoded_text"],
-            text_attention_mask=~text_dict["text_token_mask"],
-            # we ~ the mask . False means use the token; True means pad the token
+            text_attention_mask=text_attention_mask,
+            # False means use the token; True means pad the token
         )
         #########################################################
         # End Decoder
@@ -462,16 +504,18 @@ class TransformerEncoder(nn.Module):
         self.use_transformer_ckpt = use_transformer_ckpt
 
     @staticmethod
-    def get_reference_points(spatial_shapes, valid_ratios, device):
+    def get_reference_points(spatial_shapes, valid_ratios, device=None):
+        spatial_shapes_np = np.array(spatial_shapes)
         reference_points_list = []
-        for lvl, (H_, W_) in enumerate(spatial_shapes):
+        for lvl, (H_, W_) in enumerate(spatial_shapes_np):
+            H_int, W_int = int(H_), int(W_)
 
             ref_y, ref_x = jt.meshgrid(
-                jt.linspace(0.5, H_ - 0.5, H_, dtype=jt.float32),
-                jt.linspace(0.5, W_ - 0.5, W_, dtype=jt.float32),
+                jt.linspace(0.5, H_int - 0.5, H_int).float32(),
+                jt.linspace(0.5, W_int - 0.5, W_int).float32(),
             )
-            ref_y = ref_y.reshape(-1)[None] / (valid_ratios[:, None, lvl, 1] * H_)
-            ref_x = ref_x.reshape(-1)[None] / (valid_ratios[:, None, lvl, 0] * W_)
+            ref_y = ref_y.reshape(-1)[None] / (valid_ratios[:, None, lvl, 1] * H_int)
+            ref_x = ref_x.reshape(-1)[None] / (valid_ratios[:, None, lvl, 0] * W_int)
             ref = jt.stack((ref_x, ref_y), -1)
             reference_points_list.append(ref)
         reference_points = jt.concat(reference_points_list, 1)
@@ -520,7 +564,7 @@ class TransformerEncoder(nn.Module):
         # preparation and reshape
         if self.num_layers > 0:
             reference_points = self.get_reference_points(
-                spatial_shapes, valid_ratios, device=src.device
+                spatial_shapes, valid_ratios, device=None
             )
 
         if self.text_layers:
@@ -538,6 +582,12 @@ class TransformerEncoder(nn.Module):
                 pos_text = get_sine_pos_embed(
                     position_ids[..., None], num_pos_feats=256, exchange_xy=False
                 )
+            text_self_attention_masks = (
+                text_self_attention_masks.bool() if text_self_attention_masks is not None else None
+            )
+            text_self_attention_masks_inv = (
+                jt.logical_not(text_self_attention_masks) if text_self_attention_masks is not None else None
+            )
 
         # main process
         for layer_id, layer in enumerate(self.layers):
@@ -550,21 +600,21 @@ class TransformerEncoder(nn.Module):
                     output, memory_text = self.fusion_layers[layer_id](
                         v=output,
                         l=memory_text,
-                        attention_mask_v=key_padding_mask,
-                        attention_mask_l=text_attention_mask,
+                        attention_mask_v=None,
+                        attention_mask_l=None,
                     )
                 else:
                     output, memory_text = self.fusion_layers[layer_id](
                         v=output,
                         l=memory_text,
-                        attention_mask_v=key_padding_mask,
-                        attention_mask_l=text_attention_mask,
+                        attention_mask_v=None,
+                        attention_mask_l=None,
                     )
 
             if self.text_layers:
                 memory_text = self.text_layers[layer_id](
                     src=memory_text.transpose(0, 1),
-                    src_mask=~text_self_attention_masks,  # note we use ~ for mask here
+                    src_mask=text_self_attention_masks_inv,
                     src_key_padding_mask=text_attention_mask,
                     pos=(pos_text.transpose(0, 1) if pos_text is not None else None),
                 ).transpose(0, 1)
@@ -654,11 +704,20 @@ class TransformerDecoder(nn.Module):
             - refpoints_unsigmoid: nq, bs, 2/4
             - valid_ratios/spatial_shapes: bs, nlevel, 2
         """
+        debug_mode = debug_enabled()
         output = tgt
 
         intermediate = []
         reference_points = refpoints_unsigmoid.sigmoid()
         ref_points = [reference_points]
+        if debug_mode:
+            log_tensor("decoder.init.output", output, force=True)
+            log_tensor("decoder.init.reference_points", reference_points, force=True)
+            log_tensor("decoder.init.memory", memory, force=True)
+            if pos is not None:
+                log_tensor("decoder.init.pos", pos, force=True)
+            if memory_text is not None:
+                log_tensor("decoder.init.memory_text", memory_text, force=True)
 
         for layer_id, layer in enumerate(self.layers):
 
@@ -678,6 +737,11 @@ class TransformerDecoder(nn.Module):
             raw_query_pos = self.ref_point_head(query_sine_embed)  # nq, bs, 256
             pos_scale = self.query_scale(output) if self.query_scale is not None else 1
             query_pos = pos_scale * raw_query_pos
+            if debug_mode:
+                log_text(f"decoder.layer{layer_id}: start", force=True)
+                log_tensor(f"decoder.layer{layer_id}.reference_points_input", reference_points_input, force=True)
+                log_tensor(f"decoder.layer{layer_id}.query_sine_embed", query_sine_embed, force=True)
+                log_tensor(f"decoder.layer{layer_id}.query_pos", query_pos, force=True)
             # if os.environ.get("SHILONG_AMP_INFNAN_DEBUG") == '1':
             #     if query_pos.isnan().any() | query_pos.isinf().any():
             #         import ipdb; ipdb.set_trace()
@@ -699,6 +763,8 @@ class TransformerDecoder(nn.Module):
                 self_attn_mask=tgt_mask,
                 cross_attn_mask=memory_mask,
             )
+            if debug_mode:
+                log_tensor(f"decoder.layer{layer_id}.output", output, force=True)
             if output.isnan().any() | output.isinf().any():
                 print(f"output layer_id {layer_id} is nan")
                 try:
@@ -716,6 +782,10 @@ class TransformerDecoder(nn.Module):
                 delta_unsig = self.bbox_embed[layer_id](output)
                 outputs_unsig = delta_unsig + reference_before_sigmoid
                 new_reference_points = outputs_unsig.sigmoid()
+                if debug_mode:
+                    log_tensor(f"decoder.layer{layer_id}.delta_unsig", delta_unsig, force=True)
+                    log_tensor(f"decoder.layer{layer_id}.reference_before_sigmoid", reference_before_sigmoid, force=True)
+                    log_tensor(f"decoder.layer{layer_id}.new_reference_points", new_reference_points, force=True)
 
                 reference_points = new_reference_points.detach()
                 # if layer_id != self.num_layers - 1:
@@ -723,6 +793,9 @@ class TransformerDecoder(nn.Module):
 
             intermediate.append(self.norm(output))
 
+        if debug_mode:
+            log_tensor("decoder.final.output", output, force=True)
+            log_text(f"decoder.final ref_points={len(ref_points)} layers={len(intermediate)}", force=True)
         return [
             [itm_out.transpose(0, 1) for itm_out in intermediate],
             [itm_refpoint.transpose(0, 1) for itm_refpoint in ref_points],

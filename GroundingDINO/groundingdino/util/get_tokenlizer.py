@@ -28,8 +28,15 @@ def get_tokenlizer(text_encoder_type):
     # 新增：检查是否为 ModelScope 模型ID
     model_id = MODELSCOPE_MAPPING.get(text_encoder_type, text_encoder_type)
     
-    # 新增：下载模型到本地缓存（如果尚未下载）
-    local_dir = os.path.join(os.path.expanduser("~"), ".cache", "modelscope", "hub", "models", model_id)
+    # 新增：根据环境变量/原始HOME选择缓存目录（避免 HOME 被改写后找不到模型）
+    cache_root = os.environ.get("MODELSCOPE_CACHE", os.path.join(os.path.expanduser("~"), ".cache", "modelscope"))
+    local_dir = os.path.join(cache_root, "hub", "models", model_id)
+    if not os.path.exists(local_dir):
+        orig_home = os.environ.get("GROUNDINGDINO_ORIG_HOME")
+        if orig_home:
+            alt_dir = os.path.join(orig_home, ".cache", "modelscope", "hub", "models", model_id)
+            if os.path.exists(alt_dir):
+                local_dir = alt_dir
     if not os.path.exists(local_dir):
         raise EnvironmentError("local model not found!")
     
@@ -40,7 +47,14 @@ def get_tokenlizer(text_encoder_type):
 
 def get_pretrained_language_model(text_encoder_type):
     model_id = MODELSCOPE_MAPPING.get(text_encoder_type, text_encoder_type)
-    local_dir = os.path.join(os.path.expanduser("~"), ".cache", "modelscope", "hub", "models", model_id)
+    cache_root = os.environ.get("MODELSCOPE_CACHE", os.path.join(os.path.expanduser("~"), ".cache", "modelscope"))
+    local_dir = os.path.join(cache_root, "hub", "models", model_id)
+    if not os.path.exists(local_dir):
+        orig_home = os.environ.get("GROUNDINGDINO_ORIG_HOME")
+        if orig_home:
+            alt_dir = os.path.join(orig_home, ".cache", "modelscope", "hub", "models", model_id)
+            if os.path.exists(alt_dir):
+                local_dir = alt_dir
     if not os.path.exists(local_dir):
         raise EnvironmentError("local model not found!")
     

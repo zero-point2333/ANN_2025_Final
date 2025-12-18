@@ -63,6 +63,7 @@ def multi_scale_deformable_attn_pytorch(
             .transpose(1, 2)
             .reshape(bs * num_heads, num_queries, num_points, 2)
         )
+        sampling_grid_l = sampling_grid_l.float32()
 
         # grid_sample: (N, C, H, W) + (N, H_out, W_out, 2)
         sampled = nn.grid_sample(
@@ -203,7 +204,7 @@ class MultiScaleDeformableAttention(nn.Module):
         value = self.value_proj(value)
 
         if key_padding_mask is not None:
-            value = value * (~key_padding_mask[..., None]).float()
+            value = value * jt.logical_not(key_padding_mask[..., None]).float()
 
         value = value.reshape(bs, num_value, self.num_heads, -1)
 

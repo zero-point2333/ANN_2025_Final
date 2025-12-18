@@ -272,12 +272,12 @@ class NestedTensor(object):
         numpy arrays directly and convert them to jt.Var when needed.
     """
 
-    def __init__(self, tensors, mask: Optional[np.ndarray]):
+    def __init__(self, tensors, mask: Optional[np.ndarray] = "auto"):
         # tensors: numpy array of shape (B, C, H, W) or (C, H, W)
         self.tensors = tensors
         self.mask = mask
 
-        if mask == "auto":
+        if isinstance(self.mask, str) and self.mask == "auto":
             # Automatically build a "no padding" mask
             if self.tensors.ndim == 3:
                 _, h, w = self.tensors.shape
