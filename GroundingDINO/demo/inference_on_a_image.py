@@ -5,7 +5,6 @@ import sys
 import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
-import jittor as jt
 
 # =======================
 # CPU-only hard switches
@@ -30,6 +29,7 @@ os.environ.setdefault("python_config_path", py_config)
 # Enable verbose NaN/Inf diagnostics
 os.environ.setdefault("GROUNDINGDINO_DEBUG_NAN", "1")
 
+import jittor as jt
 import groundingdino.datasets.transforms as T
 from groundingdino.models import build_model
 from groundingdino.util import box_ops
