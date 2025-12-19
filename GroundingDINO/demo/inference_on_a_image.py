@@ -5,6 +5,30 @@ import sys
 import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
+import jittor as jt
+
+# =======================
+# CPU-only hard switches
+# (MUST be set before importing groundingdino.util.inference which imports jittor)
+# =======================
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_DATASETS_OFFLINE"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# 1) Tell Jittor "do NOT use cuda" via flag-style env var
+os.environ["use_cuda"] = "0"                      # Jittor flag name
+# 2) Prevent CUDA toolchain auto-enable / auto-download
+os.environ["nvcc_path"] = ""                      # empty string stops jittor_utils.install_cuda
+# 3) Hide GPUs from CUDA runtime (use empty string; avoid -1 which can be quirky)
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+# 4) Avoid multiprocess compiler pool (sandbox blocks semaphores)
+os.environ["DISABLE_MULTIPROCESSING"] = "1"
+# 5) Point Jittor at the right pythonX.Y-config so it won't try to compile against system python
+exe_real = os.path.realpath(sys.executable)
+py_config = os.path.join(os.path.dirname(exe_real), f"python{sys.version_info.major}.{sys.version_info.minor}-config")
+os.environ.setdefault("python_config_path", py_config)
+# Enable verbose NaN/Inf diagnostics
+os.environ.setdefault("GROUNDINGDINO_DEBUG_NAN", "1")
 
 import groundingdino.datasets.transforms as T
 from groundingdino.models import build_model
@@ -12,6 +36,7 @@ from groundingdino.util import box_ops
 from groundingdino.util.slconfig import SLConfig
 from groundingdino.util.utils import clean_state_dict, get_phrases_from_posmap
 from groundingdino.util.vl_utils import create_positive_map_from_span
+from groundingdino.util.misc import NestedTensor
 
 
 def plot_boxes_to_image(image_pil, tgt):
@@ -67,6 +92,19 @@ def load_image(image_path):
         ]
     )
     image, _ = transform(image_pil, None)  # 3, h, w
+    print(f"image type: {type(image)}, shape: {image.shape}")
+    # Convert torch tensor to jittor
+    if hasattr(image, 'numpy'):
+        image = jt.array(image.numpy())
+    else:
+        image = jt.array(image)
+    # Add batch dimension
+    image = jt.unsqueeze(image, 0)  # 1, 3, h, w
+    print(f"after jt: shape {image.shape}")
+    # Create mask (all True for no padding)
+    mask = jt.ones((1, image.shape[2], image.shape[3]), dtype=jt.bool)
+    # Convert to NestedTensor
+    image = NestedTensor(tensors=image, mask=mask)
     return image_pil, image
 
 
@@ -75,7 +113,11 @@ def load_model(model_config_path, model_checkpoint_path, cpu_only=False):
     args.device = "cuda" if not cpu_only else "cpu"
     model = build_model(args)
     checkpoint = torch.load(model_checkpoint_path, map_location="cpu")
-    load_res = model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
+    print("Type of bert.embeddings.position_ids:", type(checkpoint["model"].get("bert.embeddings.position_ids", "not found")))
+    try:
+        load_res = model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
+    except TypeError:
+        load_res = model.load_state_dict(clean_state_dict(checkpoint["model"]))
     print(load_res)
     _ = model.eval()
     return model
@@ -88,10 +130,10 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
     if not caption.endswith("."):
         caption = caption + "."
     device = "cuda" if not cpu_only else "cpu"
-    model = model.to(device)
-    image = image.to(device)
+    # model = model.to(device)  # Jittor does not have to() method
+    # image = image.to(device)  # Jittor Var does not have to() method
     with torch.no_grad():
-        outputs = model(image[None], captions=[caption])
+        outputs = model(image, captions=[caption])
     logits = outputs["pred_logits"].sigmoid()[0]  # (nq, 256)
     boxes = outputs["pred_boxes"][0]  # (nq, 4)
 

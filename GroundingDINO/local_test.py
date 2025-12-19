@@ -46,12 +46,6 @@ TEXT_TRESHOLD = 0.25
 image_source, image = load_image(IMAGE_PATH)
 print("IMAGE LOADED OK", flush=True)
 print("image type:", type(image), flush=True)
-try:
-    import torch
-    if isinstance(image, torch.Tensor):
-        print("torch image:", image.dtype, image.device, tuple(image.shape), flush=True)
-except Exception:
-    pass
 
 boxes, logits, phrases = predict(
     model=model,
