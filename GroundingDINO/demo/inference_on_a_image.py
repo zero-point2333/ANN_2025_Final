@@ -6,11 +6,6 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
 
-# Ensure local package is importable when running from source tree.
-_repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if _repo_root not in sys.path:
-    sys.path.insert(0, _repo_root)
-
 # =======================
 # CPU-only hard switches
 # (MUST be set before importing groundingdino.util.inference which imports jittor)
