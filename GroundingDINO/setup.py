@@ -30,5 +30,6 @@ setuptools.setup(
         "transformers==4.46.3",
         "torch",
         "torchvision",
+        "modelscope==1.31.0",
     ],
 )
