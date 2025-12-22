@@ -9,7 +9,10 @@
 import datetime
 import os
 
-import cv2
+try:
+    import cv2
+except Exception:
+    cv2 = None
 import matplotlib.pyplot as plt
 import numpy as np
 import jittor as jt
