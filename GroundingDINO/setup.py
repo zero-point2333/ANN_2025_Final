@@ -22,12 +22,12 @@ setuptools.setup(
     install_requires=[
         "jittor==1.3.10",
         "addict==2.4.0",
-        "yapf",
+        "yapf==0.43.0",
         "numpy==1.21.6",
         "opencv-python==4.5.5.64",
         "supervision==0.25.1",
         "pycocotools==2.0.7",
         "transformers==4.46.3",
-        "modelscope==1.8.1",
+        "modelscope==1.31.0",
     ],
 )
