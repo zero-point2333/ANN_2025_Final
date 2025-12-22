@@ -20,7 +20,7 @@ RUN pip install -e .
 # 设置Python路径
 ENV PYTHONPATH="${PYTHONPATH}:$WORKDIR"
 
-RUN modelscope download --model "google-bert/bert-base-uncased"
+COPY ./LLM/bert-base/uncased ~/.cache/modelscope/hub/models/google-bert/bert-base-uncased
 
 # 运行测试
 CMD ["python", "local_test.py"]
