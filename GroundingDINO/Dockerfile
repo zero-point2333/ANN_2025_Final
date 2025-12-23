@@ -1,10 +1,11 @@
-# 第一阶段：安装 Modelscope
+# 第一阶段：安装从 Modelscope 获取的模型，以及权重
 FROM python:3.14 AS build
 
 RUN pip install --upgrade pip
 RUN pip install modelscope
 
 RUN modelscope download --model google-bert/bert-base-uncased --local_dir /modelscope
+RUN wget -q https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth
 
 # 第二阶段：
 FROM python:3.8
@@ -16,8 +17,9 @@ ENV WORKDIR=/workspace
 RUN apt-get -y update
 RUN apt-get -y install libgl1
 
-# 获取第一阶段下载的模型
-COPY --from=build /modelscope /modelscope/google-bert/bert-base-uncased
+# 获取第一阶段下载的模型和权重
+COPY --from=build /modelscope /modelscope/hub/models/google-bert/bert-base-uncased
+COPY --from=build /groundingdino_swint_ogc.pth $WORKDIR/weights/groundingdino_swint_ogc.pth
 
 # 设置工作目录
 WORKDIR $WORKDIR
@@ -27,6 +29,7 @@ COPY . .
 
 # 安装Python依赖
 RUN pip install --upgrade pip
+RUN pip install -r requirements.txt
 RUN pip install -e .
 
 # 运行测试

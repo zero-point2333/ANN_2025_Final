@@ -29,7 +29,7 @@ def get_tokenlizer(text_encoder_type):
     model_id = MODELSCOPE_MAPPING.get(text_encoder_type, text_encoder_type)
     
     # 新增：根据环境变量/原始HOME选择缓存目录（避免 HOME 被改写后找不到模型）
-    cache_root = os.environ.get("MODELSCOPE_CACHE", "/modelscope")
+    cache_root = "/modelscope"
     local_dir = os.path.join(cache_root, "hub", "models", model_id)
     if not os.path.exists(local_dir):
         orig_home = os.environ.get("GROUNDINGDINO_ORIG_HOME")
@@ -47,7 +47,7 @@ def get_tokenlizer(text_encoder_type):
 
 def get_pretrained_language_model(text_encoder_type):
     model_id = MODELSCOPE_MAPPING.get(text_encoder_type, text_encoder_type)
-    cache_root = os.environ.get("MODELSCOPE_CACHE", "/modelscope")
+    cache_root = "/modelscope"
     local_dir = os.path.join(cache_root, "hub", "models", model_id)
     if not os.path.exists(local_dir):
         orig_home = os.environ.get("GROUNDINGDINO_ORIG_HOME")

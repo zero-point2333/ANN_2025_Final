@@ -28,7 +28,7 @@ setuptools.setup(
         "supervision==0.25.1",
         "pycocotools==2.0.7",
         "transformers==4.46.3",
-        "torch --index-url https://download.pytorch.org/whl/cu121",
-        "torchvision --index-url https://download.pytorch.org/whl/cu121",
+        "torch",
+        "torchvision",
     ],
 )

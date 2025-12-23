@@ -32,7 +32,7 @@ print("JT use_cuda =", jt.flags.use_cuda, flush=True)
 
 model = load_model(
     "groundingdino/config/GroundingDINO_SwinT_OGC.py",
-    "weights/groundingdino_swint_ogc_legacy.pth",
+    "weights/groundingdino_swint_ogc.pth",
     device="cpu",
     offline_mode=True
 )
