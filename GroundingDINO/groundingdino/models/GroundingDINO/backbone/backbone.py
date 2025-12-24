@@ -17,6 +17,7 @@ Backbone modules.
 """
 
 from typing import Dict, List
+from collections import OrderedDict
 
 import jittor as jt
 import jittor.nn as nn
@@ -26,7 +27,6 @@ from groundingdino.util.misc import NestedTensor, clean_state_dict, is_main_proc
 
 from .position_encoding import build_position_encoding
 from .swin_transformer import build_swin_transformer
-
 
 class FrozenBatchNorm2d(nn.Module):
     """
@@ -76,38 +76,32 @@ class FrozenBatchNorm2d(nn.Module):
 
 class IntermediateLayerGetter(nn.Module):
     """
-    Jittor版本的IntermediateLayerGetter
-    用于从backbone中提取多层特征
+    Module wrapper that returns intermediate layers from a model.
+    Adapted for Jittor from torchvision.models._utils.IntermediateLayerGetter.
     """
-    
-    def __init__(self, model, return_layers):
-        super().__init__()
-        self.model = model
-        self.return_layers = return_layers
+    def __init__(self, model: nn.Module, return_layers: Dict[str, str]) -> None:
+        if not set(return_layers).issubset([name for name, _ in model.named_children()]):
+            raise ValueError("return_layers are not present in model")
+        orig_return_layers = return_layers
+        return_layers = {str(k): str(v) for k, v in return_layers.items()}
+        layers = OrderedDict()
+        for name, module in model.named_children():
+            layers[name] = module
+            if name in return_layers:
+                del return_layers[name]
+            if not return_layers:
+                break
 
-    def execute(self, x):
-        out = {}
-        
-        # Stem部分
-        x = self.model.conv1(x)
-        x = self.model.bn1(x)
-        x = self.model.relu(x)
-        x = self.model.maxpool(x)
-        
-        # 逐层处理
-        layers = [
-            ('layer1', self.model.layer1),
-            ('layer2', self.model.layer2),
-            ('layer3', self.model.layer3),
-            ('layer4', self.model.layer4)
-        ]
-        
-        for layer_name, layer_func in layers:
-            x = layer_func(x)
-            if layer_name in self.return_layers:
-                out_key = self.return_layers[layer_name]
-                out[out_key] = x
-                
+        super().__init__(layers)
+        self.return_layers = orig_return_layers
+
+    def forward(self, x):
+        out = OrderedDict()
+        for name, module in self.items():
+            x = module(x)
+            if name in self.return_layers:
+                out_name = self.return_layers[name]
+                out[out_name] = x
         return out
 
 
@@ -162,28 +156,28 @@ class Backbone(BackboneBase):
         return_interm_indices: list,
         batch_norm=FrozenBatchNorm2d,
     ):
-        # 使用Jittor的resnet模型
-        if name == "resnet50":
-            backbone = resnet.resnet50(pretrained=is_main_process())
-        elif name == "resnet101":
-            backbone = resnet.resnet101(pretrained=is_main_process())
-        elif name == "resnet18":
-            backbone = resnet.resnet18(pretrained=is_main_process())
-        elif name == "resnet34":
-            backbone = resnet.resnet34(pretrained=is_main_process())
+        if name in ["resnet18", "resnet34", "resnet50", "resnet101"]:
+            if name == "resnet18":
+                rn = resnet.resnet18
+            elif name == "resnet34":
+                rn = resnet.resnet34
+            elif name == "resnet50":
+                rn = resnet.resnet50
+            else:
+                rn = resnet.resnet101
+            backbone = rn(
+                replace_stride_with_dilation=[False, False, dilation],
+                pretrained=is_main_process(),
+                norm_layer=batch_norm,
+            )
         else:
             raise NotImplementedError("Why you can get here with name {}".format(name))
         
-        # 处理dilation参数 - 需要根据Jittor的resnet实现进行调整
-        if dilation:
-            # 这里需要根据Jittor resnet的具体实现来修改dilation
-            # 可能需要手动修改相关层的配置
-            pass
             
         assert name not in ("resnet18", "resnet34"), "Only resnet50 and resnet101 are available."
         assert return_interm_indices in [[0, 1, 2, 3], [1, 2, 3], [3]]
         num_channels_all = [256, 512, 1024, 2048]
-        num_channels = num_channels_all[4 - len(return_interm_indices):]
+        num_channels = num_channels_all[4 - len(return_interm_indices) :]
         super().__init__(backbone, train_backbone, num_channels, return_interm_indices)
 
 
@@ -197,7 +191,7 @@ class Joiner(nn.Module):
         xs = self.backbone(tensor_list)
         out: List[NestedTensor] = []
         pos = []
-        for name, x in xs.items():
+        for _, x in xs.items():
             out.append(x)
             # position encoding
             pos.append(self.position_embedding(x).to(x.tensors.dtype))
@@ -214,6 +208,7 @@ def build_backbone(args):
         - return_interm_indices: available: [0,1,2,3], [1,2,3], [3]
         - backbone_freeze_keywords:
         - use_checkpoint: for swin only for now
+    
     """
     position_embedding = build_position_encoding(args)
     train_backbone = True
@@ -222,8 +217,7 @@ def build_backbone(args):
     return_interm_indices = args.return_interm_indices
     assert return_interm_indices in [[0, 1, 2, 3], [1, 2, 3], [3]]
     
-    if hasattr(args, "backbone_freeze_keywords"):
-        args.backbone_freeze_keywords
+    args.backbone_freeze_keywords
     use_checkpoint = getattr(args, "use_checkpoint", False)
 
     if args.backbone in ["resnet50", "resnet101"]:
@@ -251,7 +245,7 @@ def build_backbone(args):
             use_checkpoint=use_checkpoint,
         )
 
-        bb_num_channels = backbone.num_features[4 - len(return_interm_indices):]
+        bb_num_channels = backbone.num_features[4 - len(return_interm_indices) :]
     else:
         raise NotImplementedError("Unknown backbone {}".format(args.backbone))
 
@@ -264,5 +258,5 @@ def build_backbone(args):
     assert isinstance(
         bb_num_channels, List
     ), "bb_num_channels is expected to be a List but {}".format(type(bb_num_channels))
-    
+    # import ipdb; ipdb.set_trace()
     return model

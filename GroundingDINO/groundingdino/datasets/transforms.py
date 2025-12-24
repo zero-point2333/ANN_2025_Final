@@ -87,7 +87,7 @@ def hflip(image, target):
     return flipped_image, target
 
 
-def resize(image, target, size, max_size=None):
+def resize(image, target, size, max_size=None): # used
     def get_size_with_aspect_ratio(image_size, size, max_size=None):
         w, h = image_size
         if max_size is not None:
@@ -114,9 +114,9 @@ def resize(image, target, size, max_size=None):
         else:
             return get_size_with_aspect_ratio(image_size, size, max_size)
 
-    size = get_size(image.size, size, max_size)
+    size = get_size(image.size, size, max_size)[::-1]
     # PIL expects (width, height)
-    rescaled_image = image.resize(size[::-1], resample=PIL.Image.BILINEAR)
+    rescaled_image = image.resize(size, resample=PIL.Image.BILINEAR)
 
     if target is None:
         return rescaled_image, None
@@ -143,7 +143,9 @@ def resize(image, target, size, max_size=None):
 
     if "masks" in target:
         masks = target["masks"]
-        target["masks"] = (interpolate(masks[:, None].astype(jt.float32), size, mode="nearest")[:, 0] > 0.5)
+        target["masks"] = (
+            interpolate(target["masks"][:, None].astype(jt.float32), size, mode="nearest")[:, 0] > 0.5
+        )
 
     return rescaled_image, target
 
@@ -242,7 +244,7 @@ class RandomHorizontalFlip(object):
         return img, target
 
 
-class RandomResize(object):
+class RandomResize(object): # used
     def __init__(self, sizes, max_size=None):
         assert isinstance(sizes, (list, tuple))
         self.sizes = sizes
@@ -275,7 +277,7 @@ class RandomSelect(object):
         return self.transforms2(img, target)
 
 
-class ToTensor(object):
+class ToTensor(object): # used
     def __call__(self, img, target):
         if isinstance(img, PIL.Image.Image):
             img = T.to_tensor(img)
@@ -293,25 +295,17 @@ class RandomErasing(object):
         return img, target
 
 
-class Normalize(object):
+class Normalize(object): # used
     def __init__(self, mean, std):
         self.mean = mean
         self.std = std
 
     def __call__(self, image, target=None):
-        if isinstance(image, PIL.Image.Image):
-            image = T.to_tensor(image)
-        
         image = T.image_normalize(image, mean=self.mean, std=self.std)
         if target is None:
             return image, None
         target = target.copy()
-
-        if isinstance(image, jt.Var):
-            h, w = image.shape[-2:]
-        else:
-            h, w = image.shape[-2:]
-
+        h, w = image.shape[-2:]
         if "boxes" in target:
             boxes = target["boxes"]
             boxes = box_xyxy_to_cxcywh(boxes)
@@ -320,7 +314,7 @@ class Normalize(object):
         return image, target
 
 
-class Compose(object):
+class Compose(object): # used partially
     def __init__(self, transforms):
         self.transforms = transforms
 
@@ -329,7 +323,7 @@ class Compose(object):
             image, target = t(image, target)
         return image, target
 
-    def __repr__(self):
+    def __repr__(self): # unused
         format_string = self.__class__.__name__ + "("
         for t in self.transforms:
             format_string += "\n"

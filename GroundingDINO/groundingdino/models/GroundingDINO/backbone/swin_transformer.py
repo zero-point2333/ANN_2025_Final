@@ -771,8 +771,8 @@ if __name__ == "__main__":
     model = build_swin_transformer("swin_L_384_22k", 384, dilation=True)
     x = jt.rand(2, 3, 1024, 1024)
     y = model.execute_raw(x)
-    import ipdb
+    # import ipdb
 
-    ipdb.set_trace()
+    # ipdb.set_trace()
     x = jt.rand(2, 3, 384, 384)
     y = model.execute_raw(x)
