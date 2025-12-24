@@ -19,7 +19,6 @@ from typing import List
 
 import jittor as jt
 import jittor.nn as nn
-from transformers import AutoTokenizer, BertModel, BertTokenizer, RobertaModel, RobertaTokenizerFast
 
 from groundingdino.util import box_ops, get_tokenlizer
 from groundingdino.util.debug_tools import debug_enabled, log_tensor, log_text
@@ -178,8 +177,8 @@ class GroundingDINO(nn.Module):
         class_embed_layerlist = [_class_embed for i in range(transformer.num_decoder_layers)]
         self.bbox_embed = nn.ModuleList(box_embed_layerlist)
         self.class_embed = nn.ModuleList(class_embed_layerlist)
-        self.transformer.decoder.bbox_embed = self.bbox_embed
-        self.transformer.decoder.class_embed = self.class_embed
+        self.transformer.decoder.bbox_embed = copy.deepcopy(self.bbox_embed)
+        self.transformer.decoder.class_embed = copy.deepcopy(self.class_embed)
 
         # two stage
         self.two_stage_type = two_stage_type

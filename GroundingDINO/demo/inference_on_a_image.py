@@ -35,7 +35,6 @@ from groundingdino.util import box_ops
 from groundingdino.util.slconfig import SLConfig
 from groundingdino.util.utils import clean_state_dict, get_phrases_from_posmap
 from groundingdino.util.vl_utils import create_positive_map_from_span
-from groundingdino.util.misc import NestedTensor
 from groundingdino.util.debug_tools import log_text
 
 
@@ -101,11 +100,6 @@ def load_image(image_path):
         image = jt.array(image)
     # Add batch dimension
     image = jt.unsqueeze(image, 0)  # 1, 3, h, w
-    log_text(f"after jt: shape {image.shape}")
-    # Create mask (all False for no padding)
-    mask = jt.zeros((1, image.shape[2], image.shape[3]), dtype=jt.bool)
-    # Convert to NestedTensor
-    image = NestedTensor(tensors=image, mask=mask)
     return image_pil, image
 
 
@@ -114,18 +108,16 @@ def load_model(model_config_path, model_checkpoint_path, cpu_only=False):
     args.device = "cuda" if not cpu_only else "cpu"
     model = build_model(args)
     checkpoint = jt.load(model_checkpoint_path)
-    log_text("Type of bert.embeddings.position_ids:", type(checkpoint["model"].get("bert.embeddings.position_ids", "not found")))
-    
+
     # Clean and filter state dict
     cleaned_sd = clean_state_dict(checkpoint["model"])
     model_sd = model.state_dict()
     filtered_sd = {k: v for k, v in cleaned_sd.items() if k in model_sd}
     
-    try:
-        load_res = model.load_state_dict(filtered_sd, strict=False)
-    except TypeError:
-        load_res = model.load_state_dict(filtered_sd)
+    load_res = model.load_state_dict(filtered_sd)
     log_text(f"Loaded {len(filtered_sd)}/{len(cleaned_sd)} params")
+    log_text(load_res)
+
     _ = model.eval()
     return model
 
@@ -169,7 +161,7 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
         positive_maps = create_positive_map_from_span(
             model.tokenizer(caption),
             token_span=token_spans
-        ).to(image.device) # n_phrase, 256
+        ) # n_phrase, 256
 
         logits_for_phrases = jt.nn.matmul_transpose(positive_maps, logits) # n_phrase, nq
         all_logits = []
@@ -210,7 +202,7 @@ if __name__ == "__main__":
         "--output_dir", "-o", type=str, default="outputs", required=True, help="output directory"
     )
 
-    parser.add_argument("--box_threshold", type=float, default=0.99999, help="box threshold")
+    parser.add_argument("--box_threshold", type=float, default=0.3, help="box threshold")
     parser.add_argument("--text_threshold", type=float, default=0.25, help="text threshold")
     parser.add_argument("--token_spans", type=str, default=None, help=
                         "The positions of start and end positions of phrases of interest. \

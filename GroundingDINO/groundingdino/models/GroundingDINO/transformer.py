@@ -120,7 +120,7 @@ class Transformer(nn.Module):
             feature_fusion_layer=feature_fusion_layer,
             use_checkpoint=use_checkpoint,
             use_transformer_ckpt=use_transformer_ckpt,
-            enc_layer_share=True,
+            enc_layer_share=False,
         )
 
         # choose decoder layer type
@@ -656,7 +656,7 @@ class TransformerDecoder(nn.Module):
     ):
         super().__init__()
         if num_layers > 0:
-            self.layers = _get_clones(decoder_layer, num_layers, layer_share=True)
+            self.layers = _get_clones(decoder_layer, num_layers, layer_share=False)
         else:
             self.layers = []
         self.num_layers = num_layers

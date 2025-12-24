@@ -17,7 +17,7 @@ from jittor import Var
 def _get_clones(module, N, layer_share=False):
     if layer_share:
         return nn.ModuleList([module for i in range(N)])
-    else:
+    else: # to use deep copy, need to modify jittor.attention.MultiheadAttention.__setstate__()
         return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
 
