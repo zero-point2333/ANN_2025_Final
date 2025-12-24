@@ -601,9 +601,24 @@ def inverse_sigmoid(x, eps=1e-3):
 
 
 def clean_state_dict(state_dict):
+    import jittor as jt
+    import torch
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
         if k[:7] == "module.":
             k = k[7:]  # remove `module.`
-        new_state_dict[k] = v
+        # Handle backbone naming difference: backbone.0 -> backbone.backbone
+        if k.startswith("backbone.0"):
+            k = k.replace("backbone.0", "backbone.backbone", 1)
+        if k.startswith("bert."):
+            continue  # Skip BERT parameters as they are handled by transformers
+        # Only keep tensors, convert PyTorch tensors to Jittor
+        if isinstance(v, jt.Var):
+            new_state_dict[k] = v
+        elif isinstance(v, torch.Tensor):
+            new_state_dict[k] = jt.array(v.detach().cpu().numpy())
+        elif isinstance(v, dict):
+            # Recursively clean nested dicts
+            new_state_dict[k] = clean_state_dict(v)
+        # Skip non-tensor objects like modules
     return new_state_dict

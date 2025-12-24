@@ -102,6 +102,9 @@ class GroundingDINO(nn.Module):
         self.dn_label_noise_ratio = dn_label_noise_ratio
         self.dn_labelbook_size = dn_labelbook_size
 
+        # label encoder for denoising
+        self.label_enc = nn.Embedding(dn_labelbook_size + 1, self.hidden_dim)
+
         # bert
         # init tokenizer
         self.tokenizer = get_tokenlizer.get_tokenlizer(text_encoder_type)

@@ -3,7 +3,6 @@ import os
 import sys
 
 import numpy as np
-import torch
 from PIL import Image, ImageDraw, ImageFont
 
 # =======================
@@ -37,6 +36,7 @@ from groundingdino.util.slconfig import SLConfig
 from groundingdino.util.utils import clean_state_dict, get_phrases_from_posmap
 from groundingdino.util.vl_utils import create_positive_map_from_span
 from groundingdino.util.misc import NestedTensor
+from groundingdino.util.debug_tools import log_text
 
 
 def plot_boxes_to_image(image_pil, tgt):
@@ -50,9 +50,10 @@ def plot_boxes_to_image(image_pil, tgt):
     mask_draw = ImageDraw.Draw(mask)
 
     # draw boxes and masks
+    log_text(f"box size: {boxes.shape}")
     for box, label in zip(boxes, labels):
         # from 0..1 to 0..W, 0..H
-        box = box * torch.Tensor([W, H, W, H])
+        box = box * jt.array([W, H, W, H])
         # from xywh to xyxy
         box[:2] -= box[2:] / 2
         box[2:] += box[:2]
@@ -74,7 +75,8 @@ def plot_boxes_to_image(image_pil, tgt):
         # bbox = draw.textbbox((x0, y0), str(label))
         draw.rectangle(bbox, fill=color)
         draw.text((x0, y0), str(label), fill="white")
-
+        
+        # log_text(f"Drawing on [{x0}, {y0}, {x1}, {y1}]")
         mask_draw.rectangle([x0, y0, x1, y1], fill=255, width=6)
 
     return image_pil, mask
@@ -92,17 +94,16 @@ def load_image(image_path):
         ]
     )
     image, _ = transform(image_pil, None)  # 3, h, w
-    print(f"image type: {type(image)}, shape: {image.shape}")
-    # Convert torch tensor to jittor
+    log_text(f"image type: {type(image)}, shape: {image.shape}")
     if hasattr(image, 'numpy'):
         image = jt.array(image.numpy())
     else:
         image = jt.array(image)
     # Add batch dimension
     image = jt.unsqueeze(image, 0)  # 1, 3, h, w
-    print(f"after jt: shape {image.shape}")
-    # Create mask (all True for no padding)
-    mask = jt.ones((1, image.shape[2], image.shape[3]), dtype=jt.bool)
+    log_text(f"after jt: shape {image.shape}")
+    # Create mask (all False for no padding)
+    mask = jt.zeros((1, image.shape[2], image.shape[3]), dtype=jt.bool)
     # Convert to NestedTensor
     image = NestedTensor(tensors=image, mask=mask)
     return image_pil, image
@@ -112,13 +113,19 @@ def load_model(model_config_path, model_checkpoint_path, cpu_only=False):
     args = SLConfig.fromfile(model_config_path)
     args.device = "cuda" if not cpu_only else "cpu"
     model = build_model(args)
-    checkpoint = torch.load(model_checkpoint_path, map_location="cpu")
-    print("Type of bert.embeddings.position_ids:", type(checkpoint["model"].get("bert.embeddings.position_ids", "not found")))
+    checkpoint = jt.load(model_checkpoint_path)
+    log_text("Type of bert.embeddings.position_ids:", type(checkpoint["model"].get("bert.embeddings.position_ids", "not found")))
+    
+    # Clean and filter state dict
+    cleaned_sd = clean_state_dict(checkpoint["model"])
+    model_sd = model.state_dict()
+    filtered_sd = {k: v for k, v in cleaned_sd.items() if k in model_sd}
+    
     try:
-        load_res = model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
+        load_res = model.load_state_dict(filtered_sd, strict=False)
     except TypeError:
-        load_res = model.load_state_dict(clean_state_dict(checkpoint["model"]))
-    print(load_res)
+        load_res = model.load_state_dict(filtered_sd)
+    log_text(f"Loaded {len(filtered_sd)}/{len(cleaned_sd)} params")
     _ = model.eval()
     return model
 
@@ -132,7 +139,7 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
     device = "cuda" if not cpu_only else "cpu"
     # model = model.to(device)  # Jittor does not have to() method
     # image = image.to(device)  # Jittor Var does not have to() method
-    with torch.no_grad():
+    with jt.no_grad():
         outputs = model(image, captions=[caption])
     logits = outputs["pred_logits"].sigmoid()[0]  # (nq, 256)
     boxes = outputs["pred_boxes"][0]  # (nq, 4)
@@ -142,6 +149,7 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
         logits_filt = logits.cpu().clone()
         boxes_filt = boxes.cpu().clone()
         filt_mask = logits_filt.max(dim=1)[0] > box_threshold
+        log_text(f"Overall filt_mask sum: {filt_mask.sum().item()}, box_threshold: {box_threshold}")
         logits_filt = logits_filt[filt_mask]  # num_filt, 256
         boxes_filt = boxes_filt[filt_mask]  # num_filt, 4
 
@@ -159,11 +167,11 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
     else:
         # given-phrase mode
         positive_maps = create_positive_map_from_span(
-            model.tokenizer(text_prompt),
+            model.tokenizer(caption),
             token_span=token_spans
         ).to(image.device) # n_phrase, 256
 
-        logits_for_phrases = positive_maps @ logits.T # n_phrase, nq
+        logits_for_phrases = jt.nn.matmul_transpose(positive_maps, logits) # n_phrase, nq
         all_logits = []
         all_phrases = []
         all_boxes = []
@@ -172,6 +180,7 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
             phrase = ' '.join([caption[_s:_e] for (_s, _e) in token_span])
             # get mask
             filt_mask = logit_phr > box_threshold
+            log_text(f"Phrase: '{phrase}', filt_mask sum: {filt_mask.sum().item()}, logit_phr max: {logit_phr.max().item():.4f}, mean: {logit_phr.mean().item():.4f}, min: {logit_phr.min().item():.4f}")
             # filt box
             all_boxes.append(boxes[filt_mask])
             # filt logits
@@ -181,7 +190,7 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
                 all_phrases.extend([phrase + f"({str(logit.item())[:4]})" for logit in logit_phr_num])
             else:
                 all_phrases.extend([phrase for _ in range(len(filt_mask))])
-        boxes_filt = torch.cat(all_boxes, dim=0).cpu()
+        boxes_filt = jt.concat(all_boxes, dim=0).cpu()
         pred_phrases = all_phrases
 
 
@@ -201,7 +210,7 @@ if __name__ == "__main__":
         "--output_dir", "-o", type=str, default="outputs", required=True, help="output directory"
     )
 
-    parser.add_argument("--box_threshold", type=float, default=0.3, help="box threshold")
+    parser.add_argument("--box_threshold", type=float, default=0.99999, help="box threshold")
     parser.add_argument("--text_threshold", type=float, default=0.25, help="text threshold")
     parser.add_argument("--token_spans", type=str, default=None, help=
                         "The positions of start and end positions of phrases of interest. \
@@ -236,13 +245,15 @@ if __name__ == "__main__":
     # set the text_threshold to None if token_spans is set.
     if token_spans is not None:
         text_threshold = None
-        print("Using token_spans. Set the text_threshold to None.")
+        log_text("Using token_spans. Set the text_threshold to None.")
 
 
     # run model
+    log_text("Getting box...")
     boxes_filt, pred_phrases = get_grounding_output(
         model, image, text_prompt, box_threshold, text_threshold, cpu_only=args.cpu_only, token_spans=eval(f"{token_spans}")
     )
+    log_text("Box got!")
 
     # visualize pred
     size = image_pil.size
@@ -254,3 +265,4 @@ if __name__ == "__main__":
     # import ipdb; ipdb.set_trace()
     image_with_box = plot_boxes_to_image(image_pil, pred_dict)[0]
     image_with_box.save(os.path.join(output_dir, "pred.jpg"))
+    log_text("done")

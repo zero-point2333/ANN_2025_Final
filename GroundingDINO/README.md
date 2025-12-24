@@ -208,9 +208,9 @@ If you would like to specify the phrases to detect, here is a demo:
 ```bash
 CUDA_VISIBLE_DEVICES={GPU ID} python demo/inference_on_a_image.py \
 -c groundingdino/config/GroundingDINO_SwinT_OGC.py \
--p ./groundingdino_swint_ogc.pth \
+-p weights/groundingdino_swint_ogc.pth \
 -i .asset/cat_dog.jpeg \
--o logs/1111 \
+-o outputs \
 -t "There is a cat and a dog in the image ." \
 --token_spans "[[[9, 10], [11, 14]], [[19, 20], [21, 24]]]"
  [--cpu-only] # open it for cpu mode

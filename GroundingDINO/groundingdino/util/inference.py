@@ -4,6 +4,11 @@ import sys
 import bisect
 from pathlib import Path
 
+# Set Jittor environment variables before any import
+os.environ["nvcc_path"] = ""  # empty string stops jittor_utils.install_cuda
+os.environ["use_cuda"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
 import numpy as np
 from PIL import Image
 
@@ -104,7 +109,11 @@ def _set_jittor_device(device: str) -> None:
         return
     d = device.lower()
     if d.startswith("cuda"):
-        jt.flags.use_cuda = 1
+        try:
+            jt.flags.use_cuda = 1
+        except RuntimeError:
+            # CUDA not available, keep CPU mode
+            jt.flags.use_cuda = 0
     else:
         jt.flags.use_cuda = 0
 
@@ -204,6 +213,7 @@ def _filter_by_model_shape_best_effort(model: Any, sd_np: Dict[str, np.ndarray])
     """
     Best-effort: keep only keys that exist in model.state_dict() and match shape.
     If a 2D weight is transposed, auto-transpose.
+    Only include parameters, not buffers.
     """
     try:
         msd = model.state_dict()
@@ -212,9 +222,22 @@ def _filter_by_model_shape_best_effort(model: Any, sd_np: Dict[str, np.ndarray])
     except Exception:
         return sd_np
 
+    # Get parameters only, exclude buffers
+    try:
+        params = dict(model.named_parameters())
+        param_names = set(params.keys())
+    except Exception:
+        param_names = set(msd.keys())
+
     out: Dict[str, np.ndarray] = {}
+    skipped_keys = []
+    transposed_keys = []
     for k, arr in sd_np.items():
         if k not in msd:
+            skipped_keys.append(k)
+            continue
+        if k not in param_names:
+            # Skip buffers
             continue
         tgt = msd[k]
         tgt_shape = getattr(tgt, "shape", None)
@@ -228,10 +251,82 @@ def _filter_by_model_shape_best_effort(model: Any, sd_np: Dict[str, np.ndarray])
         # common: linear weights transposed
         if arr.ndim == 2 and tuple(arr.T.shape) == tuple(tgt_shape):
             out[k] = np.ascontiguousarray(arr.T)
+            transposed_keys.append(k)
             continue
 
         # otherwise skip
+        skipped_keys.append(k)
         continue
+
+    if debug_enabled():
+        log_text(f"Skipped params (not in model or shape mismatch): {len(skipped_keys)} keys", force=True)
+        if skipped_keys:
+            log_text(f"Sample skipped: {skipped_keys[:5]}", force=True)
+        log_text(f"Transposed params: {len(transposed_keys)} keys", force=True)
+        if transposed_keys:
+            log_text(f"Sample transposed: {transposed_keys[:5]}", force=True)
+        log_text(f"Matched params: {len(out)} keys", force=True)
+
+    return out
+
+
+def _filter_by_model_shape_best_effort_jt(model: Any, sd_jt: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Best-effort: keep only keys that exist in model.state_dict() and match shape.
+    If a 2D weight is transposed, auto-transpose.
+    For Jittor tensors.
+    """
+    try:
+        msd = model.state_dict()
+        if not isinstance(msd, dict):
+            return sd_jt
+    except Exception:
+        return sd_jt
+
+    # Get parameters only, exclude buffers
+    try:
+        params = dict(model.named_parameters())
+        param_names = set(params.keys())
+    except Exception:
+        param_names = set(msd.keys())
+
+    out: Dict[str, Any] = {}
+    skipped_keys = []
+    transposed_keys = []
+    for k, var in sd_jt.items():
+        if k not in msd:
+            skipped_keys.append(k)
+            continue
+        if k not in param_names:
+            # Skip buffers
+            continue
+        tgt = msd[k]
+        tgt_shape = getattr(tgt, "shape", None)
+        if tgt_shape is None:
+            tgt_shape = np.asarray(tgt).shape
+
+        if tuple(var.shape) == tuple(tgt_shape):
+            out[k] = var
+            continue
+
+        # common: linear weights transposed
+        if var.ndim == 2 and tuple(var.T.shape) == tuple(tgt_shape):
+            out[k] = var.T
+            transposed_keys.append(k)
+            continue
+
+        # otherwise skip
+        skipped_keys.append(k)
+        continue
+
+    if debug_enabled():
+        log_text(f"Skipped params (not in model or shape mismatch): {len(skipped_keys)} keys", force=True)
+        if skipped_keys:
+            log_text(f"Sample skipped: {skipped_keys[:5]}", force=True)
+        log_text(f"Transposed params: {len(transposed_keys)} keys", force=True)
+        if transposed_keys:
+            log_text(f"Sample transposed: {transposed_keys[:5]}", force=True)
+        log_text(f"Matched params: {len(out)} keys", force=True)
 
     return out
 
@@ -255,34 +350,33 @@ def load_model(model_config_path: str, model_checkpoint_path: str, device: str =
         # (Optional) load bert.* into model.bert if it's a torch module
         _try_load_bert_weights(model, full_sd)
 
-        # Convert NON-bert params to numpy for Jittor loading
-        sd_np = {}
+        # Convert NON-bert params to Jittor tensors for loading
+        sd_jt = {}
         for k, v in full_sd.items():
             if k.startswith("bert."):
                 continue
-            sd_np[k] = _torch_tensor_to_np(v)
+            arr = _torch_tensor_to_np(v)
+            sd_jt[k] = jt.array(arr)
 
         # Reduce mismatches (avoid大量 load failed / 更稳)
-        sd_np = _filter_by_model_shape_best_effort(model, sd_np)
+        sd_jt = _filter_by_model_shape_best_effort_jt(model, sd_jt)
         if debug_enabled():
             total_keys = len(full_sd)
-            matched_keys = len(sd_np)
+            matched_keys = len(sd_jt)
             log_text(
                 f"load_model: matched params {matched_keys}/{total_keys} "
                 f"(bert params skipped: {total_keys - len(full_sd)} not counted)",
                 force=True,
             )
 
-        # Prefer load_parameters in Jittor
-        if hasattr(model, "load_parameters"):
-            model.load_parameters(sd_np)
-        elif hasattr(model, "load_state_dict"):
-            try:
-                model.load_state_dict(sd_np, strict=False)
-            except TypeError:
-                model.load_state_dict(sd_np)
-        else:
-            raise AttributeError("Model has neither load_parameters nor load_state_dict")
+        # Use load_state_dict with Jittor tensors
+        try:
+            missing, unexpected = model.load_state_dict(sd_jt, strict=False)
+            if debug_enabled():
+                log_text(f"load_state_dict succeeded, missing: {len(missing)}, unexpected: {len(unexpected)}", force=True)
+        except Exception as e:
+            if debug_enabled():
+                log_text(f"load_state_dict failed: {e}", force=True)
 
     if hasattr(model, "eval"):
         model.eval()

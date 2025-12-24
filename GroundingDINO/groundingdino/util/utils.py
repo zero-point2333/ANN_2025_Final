@@ -34,6 +34,9 @@ def clean_state_dict(state_dict):
     for k, v in state_dict.items():
         if k[:7] == "module.":
             k = k[7:]  # remove `module.`
+        # Handle backbone naming difference: backbone.0 -> backbone.backbone
+        if k.startswith("backbone.0"):
+            k = k.replace("backbone.0", "backbone.backbone", 1)
         if k.startswith("bert."):
             continue  # Skip BERT parameters as they are handled by transformers
         # Only keep tensors, convert PyTorch tensors to Jittor
