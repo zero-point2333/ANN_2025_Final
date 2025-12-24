@@ -17,7 +17,7 @@ def ms_deform_attn_core_jittor(value, value_spatial_shapes, sampling_locations, 
     """
     # convert shapes to python list if jt.Var
     if isinstance(value_spatial_shapes, jt.Var):
-        vsh = value_spatial_shapes.numpy().astype(int).tolist()
+        vsh = value_spatial_shapes.numpy().int().tolist()
     else:
         vsh = [tuple(map(int, x)) for x in value_spatial_shapes]
 

@@ -553,7 +553,7 @@ def predict(
         logit = logit[: len(ids_np)]
         text_mask = logit > text_threshold
         if attn_np is not None:
-            text_mask = text_mask & (attn_np.astype(bool))
+            text_mask = text_mask & (attn_np.bool())
         if forbidden_ids:
             text_mask = text_mask & (~np.isin(ids_np, list(forbidden_ids)))
         if not text_mask.any():
@@ -644,7 +644,7 @@ class Model:
 
         return sv.Detections(
             xyxy=xyxy,
-            confidence=logits_np.astype(np.float32),
+            confidence=logits_np.float(),
         )
 
     def predict_with_caption(

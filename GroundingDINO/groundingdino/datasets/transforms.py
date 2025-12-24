@@ -144,7 +144,7 @@ def resize(image, target, size, max_size=None): # used
     if "masks" in target:
         masks = target["masks"]
         target["masks"] = (
-            interpolate(target["masks"][:, None].astype(jt.float32), size, mode="nearest")[:, 0] > 0.5
+            interpolate(target["masks"][:, None].float(), size, mode="nearest")[:, 0] > 0.5
         )
 
     return rescaled_image, target

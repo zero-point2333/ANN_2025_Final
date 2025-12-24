@@ -22,7 +22,7 @@ Various positional encodings for the transformer.
 import math
 
 import jittor as jt
-import jittor.nn as nn
+from jittor import nn
 
 from groundingdino.util.misc import NestedTensor
 
@@ -44,7 +44,7 @@ class PositionEmbeddingSine(nn.Module):
             scale = 2 * math.pi
         self.scale = scale
 
-    def execute(self, tensor_list: NestedTensor):
+    def execute(self, tensor_list: NestedTensor): # unused
         x = tensor_list.tensors
         mask = tensor_list.mask
         assert mask is not None

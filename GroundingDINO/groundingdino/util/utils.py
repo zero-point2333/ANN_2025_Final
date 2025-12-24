@@ -412,7 +412,7 @@ def random_boxes(num=1, scale=1, rng=None):
     """
     rng = ensure_rng(rng)
 
-    tlbr = rng.rand(num, 4).astype(np.float32)
+    tlbr = rng.rand(num, 4).float()
 
     tl_x = np.minimum(tlbr[:, 0], tlbr[:, 2])
     tl_y = np.minimum(tlbr[:, 1], tlbr[:, 3])
