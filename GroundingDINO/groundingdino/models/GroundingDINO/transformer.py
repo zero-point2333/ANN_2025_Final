@@ -166,7 +166,7 @@ class Transformer(nn.Module):
         self.embed_init_tgt = embed_init_tgt
         if (two_stage_type != "no" and embed_init_tgt) or (two_stage_type == "no"):
             self.tgt_embed = nn.Embedding(self.num_queries, d_model)
-            self.tgt_embed.weight.normal_()
+            self.tgt_embed.weight.gauss_()
         else:
             self.tgt_embed = None
 
@@ -197,7 +197,7 @@ class Transformer(nn.Module):
             if isinstance(m, MSDeformAttn):
                 m.init_weights()
         if self.num_feature_levels > 1 and self.level_embed is not None:
-            self.level_embed.normal_()
+            self.level_embed.gauss_()
 
     def get_valid_ratio(self, mask):
         mask = mask.bool()
@@ -273,9 +273,10 @@ class Transformer(nn.Module):
         src_flatten = jt.concat(src_flatten, 1)  # bs, \sum{hxw}, c
         mask_flatten = jt.concat(mask_flatten, 1)  # bs, \sum{hxw}
         lvl_pos_embed_flatten = jt.concat(lvl_pos_embed_flatten, 1)  # bs, \sum{hxw}, c
-        spatial_shapes = jt.array(spatial_shapes, dtype=jt.int64)
+        # Use int32 to avoid CUDA int64 atomic reduce issues in Jittor.
+        spatial_shapes = jt.array(spatial_shapes, dtype=jt.int32)
         level_start_index = jt.concat(
-            (jt.zeros((1,), dtype=jt.int64), spatial_shapes.prod(1).cumsum(0)[:-1])
+            (jt.zeros((1,), dtype=jt.int32), spatial_shapes.prod(1).cumsum(0)[:-1])
         )
         valid_ratios = jt.stack([self.get_valid_ratio(m) for m in masks], 1)
         if debug_mode:
@@ -958,6 +959,10 @@ class DeformableTransformerDecoderLayer(nn.Module):
         """
         assert cross_attn_mask is None
 
+        if tgt_key_padding_mask is not None:
+            keep = jt.logical_not(tgt_key_padding_mask).transpose(0, 1).unsqueeze(-1).float()
+            tgt = tgt * keep
+
         # self attention
         if self.self_attn is not None:
             # import ipdb; ipdb.set_trace()
@@ -967,11 +972,14 @@ class DeformableTransformerDecoderLayer(nn.Module):
             tgt = self.norm2(tgt)
 
         if self.use_text_cross_attention:
+            memory_text_for_attn = memory_text
+            if memory_text_for_attn is not None and text_attention_mask is not None:
+                keep = jt.logical_not(text_attention_mask).transpose(0, 1).unsqueeze(-1).float()
+                memory_text_for_attn = memory_text_for_attn * keep
             tgt2 = self.ca_text(
                 self.with_pos_embed(tgt, tgt_query_pos),
-                memory_text.transpose(0, 1),
-                memory_text.transpose(0, 1),
-                key_padding_mask=text_attention_mask,
+                memory_text_for_attn.transpose(0, 1),
+                memory_text_for_attn.transpose(0, 1),
             )[0]
             tgt = tgt + self.catext_dropout(tgt2)
             tgt = self.catext_norm(tgt)
