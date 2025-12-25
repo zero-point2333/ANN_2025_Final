@@ -104,16 +104,16 @@ class TransformerEncoderLayer(nn.Module):
         src_key_padding_mask: Optional[jt.Var] = None,
         pos: Optional[jt.Var] = None,
     ):
-        # repeat attn mask
-        if src_mask is not None and src_mask.dim() == 3 and src_mask.shape[0] == src.shape[1]:
-            # bs, num_q, num_k
-            src_mask = src_mask.repeat(self.nhead, 1, 1)
+        if src_key_padding_mask is not None:
+            # Approximate key padding by zeroing padded tokens.
+            keep = jt.logical_not(src_key_padding_mask).transpose(0, 1).unsqueeze(-1).float()
+            src = src * keep
+            if pos is not None:
+                pos = pos * keep
 
         q = k = self.with_pos_embed(src, pos)
 
         src2 = self.self_attn(q, k, value=src, attn_mask=src_mask)[0]
-
-        # src2 = self.self_attn(q, k, value=src, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[0]
         src = src + self.dropout1(src2)
         src = self.norm1(src)
         src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
