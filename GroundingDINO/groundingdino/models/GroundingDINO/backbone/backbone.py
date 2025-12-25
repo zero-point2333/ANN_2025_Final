@@ -187,6 +187,14 @@ class Joiner(nn.Module):
         self.backbone = backbone
         self.position_embedding = position_embedding
 
+    def __getitem__(self, index):
+        if index == 0:
+            return self.backbone
+        elif index == 1:
+            return self.position_embedding
+        else:
+            raise TypeError("Wrong Index Called")
+
     def execute(self, tensor_list: NestedTensor):
         xs = self.backbone(tensor_list)
         out: List[NestedTensor] = []

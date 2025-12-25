@@ -174,8 +174,8 @@ class BertModelWarper(nn.Module):
         # sequence_output = jt.array(sequence_output.detach().numpy())
         
         # Convert to PyTorch for pooler
-        sequence_output_pt = torch.from_numpy(sequence_output.numpy())
-        pooled_output_pt = self.pooler(sequence_output_pt) if self.pooler is not None else None
+        # sequence_output_pt = torch.from_numpy(sequence_output.numpy())
+        pooled_output_pt = self.pooler(sequence_output) if self.pooler is not None else None
         
         # # Convert pooled_output back to Jittor(不需要，函数的返回值统一为pytorch的tensor，后面调用的时候再转换)
         # pooled_output = jt.array(pooled_output_pt.detach().numpy()) if pooled_output is not None else None
@@ -185,7 +185,7 @@ class BertModelWarper(nn.Module):
 
         # modify: 这里得到输入应该是pytorch的tensor才对
         return BaseModelOutputWithPoolingAndCrossAttentions(
-            last_hidden_state=sequence_output_pt,
+            last_hidden_state=sequence_output,
             pooler_output=pooled_output_pt,
             past_key_values=encoder_outputs.past_key_values,
             hidden_states=encoder_outputs.hidden_states,
