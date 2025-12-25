@@ -18,8 +18,6 @@ from typing import Optional
 
 import jittor as jt
 import jittor.nn as nn
-from jittor import Var
-
 
 from .utils import (
     MLP,

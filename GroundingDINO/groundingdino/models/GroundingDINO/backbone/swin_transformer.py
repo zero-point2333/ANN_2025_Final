@@ -52,29 +52,7 @@ def _trunc_normal_(tensor, mean, std, a, b):
     tensor.clamp_(min_v=a, max_v=b)
     return tensor
 
-
 def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
-    r"""Fills the input Tensor with values drawn from a truncated
-    normal distribution. The values are effectively drawn from the
-    normal distribution :math:`\mathcal{N}(\text{mean}, \text{std}^2)`
-    with values outside :math:`[a, b]` redrawn until they are within
-    the bounds. The method used for generating the random values works
-    best when :math:`a \leq \text{mean} \leq b`.
-
-    NOTE: this impl is similar to the PyTorch trunc_normal_, the bounds [a, b] are
-    applied while sampling the normal with mean/std applied, therefore a, b args
-    should be adjusted to match the range of mean, std args.
-
-    Args:
-        tensor: an n-dimensional `torch.Tensor`
-        mean: the mean of the normal distribution
-        std: the standard deviation of the normal distribution
-        a: the minimum cutoff value
-        b: the maximum cutoff value
-    Examples:
-        >>> w = torch.empty(3, 5)
-        >>> nn.init.trunc_normal_(w)
-    """
     with jt.no_grad():
         return _trunc_normal_(tensor, mean, std, a, b)
 
@@ -282,8 +260,7 @@ class SwinTransformerBlock(nn.Module):
             proj_drop=drop,
         )
 
-        # Jittor中没有DropPath，使用Identity代替
-        self.drop_path = nn.Identity() if drop_path <= 0.0 else nn.Dropout(drop_path)
+        self.drop_path = nn.Dropout(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(
@@ -578,6 +555,7 @@ class SwinTransformer(nn.Module):
         frozen_stages (int): Stages to be frozen (stop grad and set eval mode).
             -1 means not freezing any parameters.
         dilation (bool): if True, the output size if 16x downsample, ow 32x downsample.
+        use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
     """
 
     def __init__(
@@ -635,7 +613,7 @@ class SwinTransformer(nn.Module):
                 jt.zeros(1, embed_dim, patches_resolution[0], patches_resolution[1])
             )
             # Jittor中没有trunc_normal_，使用高斯初始化
-            nn.init.gauss_(self.absolute_pos_embed, 0, 0.02)
+            trunc_normal_(self.absolute_pos_embed, std=0.02)
 
         self.pos_drop = nn.Dropout(p=drop_rate)
 

@@ -16,6 +16,7 @@ class BertModelWarper(nn.Module):
         super().__init__()
         # self.bert = bert_modelc
 
+        # 这里的模块直接引用transformers的BertModel，输入的参数都应该是pytorch的tensor
         self.config = bert_model.config
         self.embeddings = bert_model.embeddings
         self.encoder = bert_model.encoder
@@ -87,7 +88,7 @@ class BertModelWarper(nn.Module):
         else:
             raise ValueError("You have to specify either input_ids or inputs_embeds")
 
-        device = None  # Jittor doesn't have device attribute
+        # Jittor doesn't have device attribute
 
         # past_key_values_length
         past_key_values_length = (
@@ -99,7 +100,7 @@ class BertModelWarper(nn.Module):
                 (batch_size, seq_length + past_key_values_length)
             )
         if token_type_ids is None:
-            token_type_ids = jt.zeros(input_shape, dtype=jt.long)
+            token_type_ids = jt.zeros(input_shape, dtype=jt.int64)
 
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
@@ -169,22 +170,23 @@ class BertModelWarper(nn.Module):
         )
         sequence_output = encoder_outputs[0]
 
-        # Convert back to Jittor
-        sequence_output = jt.array(sequence_output.detach().numpy())
+        # # Convert back to Jittor(不需要，函数的返回值统一为pytorch的tensor，后面调用的时候再转换)
+        # sequence_output = jt.array(sequence_output.detach().numpy())
         
         # Convert to PyTorch for pooler
         sequence_output_pt = torch.from_numpy(sequence_output.numpy())
-        pooled_output = self.pooler(sequence_output_pt) if self.pooler is not None else None
+        pooled_output_pt = self.pooler(sequence_output_pt) if self.pooler is not None else None
         
-        # Convert pooled_output back to Jittor
-        pooled_output = jt.array(pooled_output.detach().numpy()) if pooled_output is not None else None
+        # # Convert pooled_output back to Jittor(不需要，函数的返回值统一为pytorch的tensor，后面调用的时候再转换)
+        # pooled_output = jt.array(pooled_output_pt.detach().numpy()) if pooled_output is not None else None
 
         if not return_dict:
-            return (sequence_output, pooled_output) + encoder_outputs[1:]
+            return (sequence_output, pooled_output_pt) + encoder_outputs[1:]
 
+        # modify: 这里得到输入应该是pytorch的tensor才对
         return BaseModelOutputWithPoolingAndCrossAttentions(
-            last_hidden_state=sequence_output,
-            pooler_output=pooled_output,
+            last_hidden_state=sequence_output_pt,
+            pooler_output=pooled_output_pt,
             past_key_values=encoder_outputs.past_key_values,
             hidden_states=encoder_outputs.hidden_states,
             attentions=encoder_outputs.attentions,
@@ -235,7 +237,7 @@ def generate_masks_with_special_tokens(tokenized, special_tokens_list, tokenizer
         else:
             attention_mask[row, previous_col + 1 : col + 1, previous_col + 1 : col + 1] = True
             position_ids[row, previous_col + 1 : col + 1] = jt.arange(
-                0, col - previous_col, device=input_ids.device
+                0, col - previous_col
             )
 
         previous_col = col

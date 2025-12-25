@@ -7,8 +7,7 @@
 
 import jittor as jt
 import jittor.nn as nn
-import jittor as jt
-import jittor.nn as nn
+
 
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks)."""
@@ -74,7 +73,7 @@ def func_attention(query, context, smooth=1, raw_feature_norm="softmax", eps=1e-
 
     # Get attention
     # --> (batch, d, queryL)
-    queryT = query.transpose(1, 2)
+    queryT = jt.transpose(query, 1, 2)
 
     # (batch, sourceL, d)(batch, d, queryL)
     # --> (batch, sourceL, queryL)
@@ -93,22 +92,22 @@ def func_attention(query, context, smooth=1, raw_feature_norm="softmax", eps=1e-
     else:
         raise ValueError("unknown first norm type:", raw_feature_norm)
     # --> (batch, queryL, sourceL)
-    attn = attn.transpose(1, 2)
+    attn = jt.transpose(attn, 1, 2)
     # --> (batch*queryL, sourceL)
     attn = attn.view(batch_size * queryL, sourceL)
     attn = nn.softmax(attn * smooth, dim=-1)
     # --> (batch, queryL, sourceL)
     attn = attn.view(batch_size, queryL, sourceL)
     # --> (batch, sourceL, queryL)
-    attnT = attn.transpose(1, 2)
+    attnT = jt.transpose(attn, 1, 2)
 
     # --> (batch, d, sourceL)
-    contextT = context.transpose(1, 2)
+    contextT = jt.transpose(context, 1, 2)
     # (batch x d x sourceL)(batch x sourceL x queryL)
     # --> (batch, d, queryL)
     weightedContext = jt.bmm(contextT, attnT)
     # --> (batch, queryL, d)
-    weightedContext = weightedContext.transpose(1, 2)
+    weightedContext = jt.transpose(weightedContext, 1, 2)
 
     return weightedContext, attnT
 
@@ -148,24 +147,17 @@ class BiMultiHeadAttention(nn.Module):
 
     def _reset_parameters(self):
         nn.init.xavier_uniform_(self.v_proj.weight)
+        nn.init.zero_(self.v_proj.bias)
         nn.init.xavier_uniform_(self.l_proj.weight)
+        nn.init.zero_(self.l_proj.bias)
         nn.init.xavier_uniform_(self.values_v_proj.weight)
+        nn.init.zero_(self.values_v_proj.bias)
         nn.init.xavier_uniform_(self.values_l_proj.weight)
+        nn.init.zero_(self.values_l_proj.bias)
         nn.init.xavier_uniform_(self.out_v_proj.weight)
+        nn.init.zero_(self.out_v_proj.bias)
         nn.init.xavier_uniform_(self.out_l_proj.weight)
-
-        if self.v_proj.bias is not None:
-            self.v_proj.bias.data[...] = 0
-        if self.l_proj.bias is not None:
-            self.l_proj.bias.data[...] = 0
-        if self.values_v_proj.bias is not None:
-            self.values_v_proj.bias.data[...] = 0
-        if self.values_l_proj.bias is not None:
-            self.values_l_proj.bias.data[...] = 0
-        if self.out_v_proj.bias is not None:
-            self.out_v_proj.bias.data[...] = 0
-        if self.out_l_proj.bias is not None:
-            self.out_l_proj.bias.data[...] = 0
+        nn.init.zero_(self.out_l_proj.bias)
 
     def execute(self, v, l, attention_mask_v=None, attention_mask_l=None):
         """_summary_
@@ -227,23 +219,19 @@ class BiMultiHeadAttention(nn.Module):
 
         # mask vison for language
         if attention_mask_v is not None:
-            bs_mask, _, src_len_mask = attention_mask_v.shape[0], attention_mask_v.shape[1], attention_mask_v.shape[-1]
-            _, dim1, dim2 = attn_weights_l.shape
-            attention_mask_v = attention_mask_v[:, None, None, :].repeat(
-                1, self.num_heads, dim1, 1
-            ).reshape(bs_mask * self.num_heads, dim1, dim2)
-            attn_weights_l = attn_weights_l.masked_fill(attention_mask_v, float("-inf"))
+            attention_mask_v = (
+                attention_mask_v[:, None, None, :].repeat(1, self.num_heads, 1, 1).reshape(-1, attention_mask_v.shape[-1])
+            )
+            attn_weights_l = jt.masked_fill(attention_mask_v, float("-inf"))
 
         attn_weights_l = nn.softmax(attn_weights_l, dim=-1)
 
         # mask language for vision
         if attention_mask_l is not None:
-            bs_mask, _, src_len_mask = attention_mask_l.shape[0], attention_mask_l.shape[1], attention_mask_l.shape[-1]
-            _, dim1, dim2 = attn_weights.shape
-            attention_mask_l = attention_mask_l[:, None, None, :].repeat(
-                1, self.num_heads, dim1, 1
-            ).reshape(bs_mask * self.num_heads, dim1, dim2)
-            attn_weights = attn_weights.masked_fill(attention_mask_l, float("-inf"))
+            attention_mask_l = (
+                attention_mask_l[:, None, None, :].repeat(1, self.num_heads, 1, 1).reshape(-1, attention_mask_l.shape[-1])
+            )
+            attn_weights = jt.masked_fill(attention_mask_l, float("-inf"))
         attn_weights_v = nn.softmax(attn_weights, dim=-1)
 
         attn_probs_v = nn.dropout(attn_weights_v, p=self.dropout)

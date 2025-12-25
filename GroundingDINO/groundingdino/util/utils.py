@@ -6,6 +6,7 @@ from copy import deepcopy
 from typing import Any, Dict, List
 
 import numpy as np
+import torch
 import jittor as jt
 from jittor import nn
 from transformers import AutoTokenizer
@@ -28,39 +29,21 @@ def slprint(x, name="x"):
 
 
 def clean_state_dict(state_dict):
-    import jittor as jt
-    import torch
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
         if k[:7] == "module.":
             k = k[7:]  # remove `module.`
-        # Handle backbone naming difference: backbone.0 -> backbone.backbone
-        if k.startswith("backbone.0"):
-            k = k.replace("backbone.0", "backbone.backbone", 1)
-        if k.startswith("bert."):
-            continue  # Skip BERT parameters as they are handled by transformers
-        # Only keep tensors, convert PyTorch tensors to Jittor
-        if isinstance(v, jt.Var):
-            new_state_dict[k] = v
-        elif isinstance(v, torch.Tensor):
-            new_state_dict[k] = jt.array(v.detach().cpu().numpy())
-        elif isinstance(v, dict):
-            # Recursively clean nested dicts
-            new_state_dict[k] = clean_state_dict(v)
-        # Skip non-tensor objects like modules
+        new_state_dict[k] = v
     return new_state_dict
 
 
 def renorm(
-    img, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-):
+    img: jt.array, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+) -> jt.array:
     """
     img: jt.Var with shape (3,H,W) or (B,3,H,W)
     return: same shape as img
     """
-    # 兼容 jt.Var / numpy
-    if isinstance(img, np.ndarray):
-        img = jt.array(img)
     assert len(img.shape) in (3, 4), f"img.ndim should be 3 or 4 but {len(img.shape)}"
 
     if len(img.shape) == 3:
@@ -172,24 +155,21 @@ class CocoClassMapper:
     def compact2origin(self, idx):
         return self.compact2origin_mapper[int(idx)]
 
-
-def to_device(item, device):
-
-    # Jittor: 全局 jt.flags.use_cuda 控制设备
-    if hasattr(item, "to") and not isinstance(item, (list, dict)):
-        try:
-            return item.to(device)
-        except TypeError:
-            # Jittor Var.to(...) 可能不存在，直接返回
-            return item
-    elif isinstance(item, list):
-        return [to_device(i, device) for i in item]
-    elif isinstance(item, dict):
-        return {k: to_device(v, device) for k, v in item.items()}
-    else:
-        return item
+# jittor 版本不需要这个函数
+# def to_device(item, device):
+#     if isinstance(item, torch.Tensor):
+#         return item.to(device)
+#     elif isinstance(item, list):
+#         return [to_device(i, device) for i in item]
+#     elif isinstance(item, dict):
+#         return {k: to_device(v, device) for k, v in item.items()}
+#     else:
+#         raise NotImplementedError(
+#             "Call Shilong if you use other containers! type: {}".format(type(item))
+#         )
 
 
+#
 def get_gaussian_mean(x, axis, other_axis, softmax=True):
     """
     Args:
@@ -225,7 +205,7 @@ def get_expected_points_from_map(hm, softmax=True):
     return jt.stack([x_mean, y_mean], dim=2)
 
 
-# Positional encoding
+# Positional encoding (section 5.1)
 # borrow from nerf
 class Embedder:
     def __init__(self, **kwargs):
@@ -248,10 +228,8 @@ class Embedder:
         else:
             freq_bands = jt.linspace(2.0 ** 0.0, 2.0 ** float(max_freq), steps=N_freqs)
 
-        # 将频率转换为 python float
-        freq_bands_list = [float(v) for v in freq_bands.tolist()]
 
-        for freq in freq_bands_list:
+        for freq in freq_bands:
             for p_fn in self.kwargs["periodic_fns"]:
                 # 这里 freq 是 float，后面 x 是 jt.Var
                 embed_fns.append(lambda x, p_fn=p_fn, freq=freq: p_fn(x * freq))
@@ -261,18 +239,13 @@ class Embedder:
         self.out_dim = out_dim
 
     def embed(self, inputs):
-        outs = [fn(inputs) for fn in self.embed_fns]
-        return jt.concat(outs, dim=-1)
+        return jt.concat([fn(inputs) for fn in self.embed_fns], dim=-1)
 
 
 def get_embedder(multires, i=0):
+    import jittor.nn as nn
     if i == -1:
-        # 简单 Identity
-        class _Identity:
-            def __call__(self, x):
-                return x
-
-        return _Identity(), 3
+        return nn.Identity(), 3
 
     embed_kwargs = {
         "include_input": True,
@@ -301,15 +274,10 @@ class APOPMeter:
             pred, gt: Var / Tensor with same shape, values in {0,1}
         """
         assert pred.shape == gt.shape
-        pred1 = (pred == 1)
-        gt1 = (gt == 1)
-        pred0 = (pred == 0)
-        gt0 = (gt == 0)
-
-        self.tp += (jt.logical_and(pred1, gt1)).sum().item()
-        self.fp += (jt.logical_and(pred1, gt0)).sum().item()
-        self.tn += (jt.logical_and(pred0, gt0)).sum().item()
-        self.tn += (jt.logical_and(pred1, gt0)).sum().item()
+        self.tp += jt.logical_and(pred == 1, gt == 1).sum().item()
+        self.fp += jt.logical_and(pred == 1, gt == 0).sum().item()
+        self.tn += jt.logical_and(pred == 0, gt == 0).sum().item()
+        self.tn += jt.logical_and(pred == 1, gt == 0).sum().item()
 
     def update_cm(self, tp, fp, tn, fn):
         self.tp += tp
@@ -319,11 +287,9 @@ class APOPMeter:
 
 
 def inverse_sigmoid(x, eps=1e-5):
-    # x: jt.Var, clamp 到 [0,1]
-    x = jt.maximum(x, 0.0)
-    x = jt.minimum(x, 1.0)
-    x1 = jt.maximum(x, eps)
-    x2 = jt.maximum(1.0 - x, eps)
+    x = jt.clamp(x,min_v=0,max_v=1)
+    x1 = jt.clamp(x, min_v=eps)
+    x2 = jt.clamp(1.0 - x, min_v=eps)
     return jt.log(x1 / x2)
 
 
@@ -346,9 +312,6 @@ def get_raw_dict(args):
 
 
 def stat_tensors(tensor):
-    """
-    输入 1-D jt.Var，输出若干统计量
-    """
     assert len(tensor.shape) == 1
     tensor_sm = nn.softmax(tensor, dim=0)
     entropy = (tensor_sm * jt.log(tensor_sm + 1e-9)).sum()
@@ -431,7 +394,7 @@ def random_boxes(num=1, scale=1, rng=None):
 class ModelEma(nn.Module):
 
     def __init__(self, model, decay=0.9997, device=None):
-        super().__init__()
+        super(ModelEma, self).__init__()
         # make a copy of the model
         self.module = deepcopy(model)
         self.module.eval()
@@ -441,16 +404,19 @@ class ModelEma(nn.Module):
         # Jittor 一般不需要 per-module 设置 device，统一由 jt.flags.use_cuda 控制
 
     def _update(self, model, update_fn):
-        # 简化实现：直接深拷贝当前模型
-        self.module = deepcopy(model)
-        self.module.eval()
+        # 使用 jt.no_grad() 替代 torch.no_grad()
+        with jt.no_grad():
+            # 获取状态字典的值，Jittor 中 state_dict() 返回的是字典
+            for ema_v, model_v in zip(
+                self.module.state_dict().values(), model.state_dict().values()
+            ):
+                ema_v.update(update_fn(ema_v, model_v))
 
     def update(self, model):
-        self._update(model, update_fn=None)
+        self._update(model, update_fn=lambda e, m: self.decay * e + (1.0 - self.decay) * m)
 
     def set(self, model):
-        self.module = deepcopy(model)
-        self.module.eval()
+        self._update(model, update_fn=lambda e, m: m)
 
 
 class BestMetricSingle:
@@ -544,47 +510,28 @@ def targets_to(targets: List[Dict[str, Any]], device):
         "caption",
         "dataset_type",
     ]
-    new_targets = []
-    for t in targets:
-        new_t = {}
-        for k, v in t.items():
-            if k in excluded_keys:
-                new_t[k] = v
-            else:
-                if hasattr(v, "to"):
-                    try:
-                        new_t[k] = v.to(device)
-                    except TypeError:
-                        new_t[k] = v
-                else:
-                    new_t[k] = v
-        new_targets.append(new_t)
-    return new_targets
+    return [
+        {k: v if k not in excluded_keys else v for k, v in t.items()} for t in targets
+    ]
 
 
 def get_phrases_from_posmap(
-    posmap,
+    posmap: jt.Var,  # 输入类型改为 jt.Var
     tokenized: Dict,
     tokenizer: AutoTokenizer,
     left_idx: int = 0,
-    right_idx: int = 255,
+    right_idx: int = 255
 ):
-    """
-    posmap: 1-D bool mask (jt.Var / numpy / list)，True 的位置对应要保留的 token。
-    """
-    # 转成 numpy
-    if hasattr(posmap, "numpy"):
-        mask = posmap.numpy()
+    # 检查输入类型是否为 Jittor 张量
+    assert isinstance(posmap, jt.Var), "posmap must be jt.Var"
+    
+    if posmap.ndim == 1:
+        posmap[0: left_idx + 1] = False
+        posmap[right_idx:] = False
+        non_zero_indices = posmap.nonzero()  # 返回形状为 [num_nonzero, ndim] 的张量
+        non_zero_idx = non_zero_indices[:, 0].tolist()  # 取所有行的第0列（第一个维度的索引）并转换为列表
+        
+        token_ids = [tokenized["input_ids"][i] for i in non_zero_idx]
+        return tokenizer.decode(token_ids)
     else:
-        mask = np.asarray(posmap)
-
-    assert mask.ndim == 1, "posmap must be 1-dim"
-
-    # 截掉 [0, left_idx] 和 [right_idx, end)
-    mask[: left_idx + 1] = False
-    if right_idx < mask.shape[0]:
-        mask[right_idx:] = False
-
-    non_zero_idx = np.nonzero(mask)[0].tolist()
-    token_ids = [tokenized["input_ids"][i] for i in non_zero_idx]
-    return tokenizer.decode(token_ids)
+        raise NotImplementedError("posmap must be 1-dim")

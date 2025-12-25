@@ -19,7 +19,7 @@ from typing import List
 
 import jittor as jt
 import jittor.nn as nn
-
+from transformers import AutoTokenizer, BertModel, BertTokenizer, RobertaModel, RobertaTokenizerFast
 from groundingdino.util import box_ops, get_tokenlizer
 from groundingdino.util.debug_tools import debug_enabled, log_tensor, log_text
 from groundingdino.util.misc import (
@@ -177,8 +177,8 @@ class GroundingDINO(nn.Module):
         class_embed_layerlist = [_class_embed for i in range(transformer.num_decoder_layers)]
         self.bbox_embed = nn.ModuleList(box_embed_layerlist)
         self.class_embed = nn.ModuleList(class_embed_layerlist)
-        self.transformer.decoder.bbox_embed = copy.deepcopy(self.bbox_embed)
-        self.transformer.decoder.class_embed = copy.deepcopy(self.class_embed)
+        self.transformer.decoder.bbox_embed = self.bbox_embed
+        self.transformer.decoder.class_embed = self.class_embed
 
         # two stage
         self.two_stage_type = two_stage_type
@@ -241,26 +241,15 @@ class GroundingDINO(nn.Module):
            - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
                             dictionnaries containing the two above keys for each decoder layer.
         """
-        debug_mode = debug_enabled()
         if targets is None:
             captions = kw["captions"]
         else:
             captions = [t["caption"] for t in targets]
-        if debug_mode:
-            first_caption = captions[0] if captions else ""
-            log_text(f"GroundingDINO.execute: batch={len(captions)} first_caption='{first_caption}'", force=True)
 
         # encoder texts
         tokenized = self.tokenizer(captions, padding="longest", return_tensors="pt")
         # Convert to Jittor tensors
         tokenized = {k: jt.array(v.numpy()) for k, v in tokenized.items()}
-        if debug_mode:
-            log_text(
-                f"tokenized shapes: input_ids={tuple(tokenized['input_ids'].shape)} "
-                f"attn_mask={tuple(tokenized['attention_mask'].shape)}",
-                force=True,
-            )
-        padding_mask = tokenized["attention_mask"].bool()
         (
             text_self_attention_masks,
             position_ids,
@@ -277,7 +266,6 @@ class GroundingDINO(nn.Module):
             tokenized["input_ids"] = tokenized["input_ids"][:, : self.max_text_len]
             tokenized["attention_mask"] = tokenized["attention_mask"][:, : self.max_text_len]
             tokenized["token_type_ids"] = tokenized["token_type_ids"][:, : self.max_text_len]
-            padding_mask = padding_mask[:, : self.max_text_len]
 
         # extract text embeddings
         if self.sub_sentence_present:
@@ -287,15 +275,13 @@ class GroundingDINO(nn.Module):
         else:
             # import ipdb; ipdb.set_trace()
             tokenized_for_encoder = tokenized
-
+        #这里返回的都是pytorch的tensor
         bert_output = self.bert(**tokenized_for_encoder)  # bs, 195, 768
-        if debug_mode:
-            log_tensor("bert.last_hidden_state", bert_output["last_hidden_state"], force=True)
+        # 转换为jittor的tensor
+        bert_output = {k: jt.array(v.detach().numpy()) for k, v in bert_output.items()}
 
         encoded_text = self.feat_map(bert_output["last_hidden_state"])  # bs, 195, d_model
-        if debug_mode:
-            log_tensor("encoded_text", encoded_text, force=True)
-        text_token_mask = padding_mask  # bs, 195
+        text_token_mask = tokenized['attention_mask'].bool()  # bs, 195
         # text_token_mask: True for nomask, False for mask
         # text_self_attention_masks: True for nomask, False for mask
 
@@ -319,22 +305,12 @@ class GroundingDINO(nn.Module):
             samples = nested_tensor_from_tensor_list(samples)
         if not hasattr(self, 'features') or not hasattr(self, 'poss'):
             self.set_image_tensor(samples)
-        if debug_mode:
-            try:
-                log_tensor("samples.tensor", samples.tensors, force=True)
-                log_tensor("samples.mask", samples.mask, force=True)
-            except Exception:
-                pass
 
         srcs = []
         masks = []
         for l, feat in enumerate(self.features):
             src, mask = feat.decompose()
-            if debug_mode:
-                log_tensor(f"backbone.src[{l}]", src, force=True)
-                log_tensor(f"backbone.mask[{l}]", mask, force=True)
-            src_proj = self.input_proj[l](jt.array(src))
-            srcs.append(src_proj)
+            srcs.append(self.input_proj[l](jt.array(src)))
             masks.append(mask)
             assert mask is not None
         if self.num_feature_levels > len(srcs):
@@ -346,20 +322,12 @@ class GroundingDINO(nn.Module):
                     src = self.input_proj[l](srcs[-1])
                 m = samples.mask
                 mask = nn.interpolate(jt.array(m)[None].float(), size=src.shape[-2:]).bool()[0]
-                pos_l = self.backbone.position_embedding(NestedTensor(src.numpy(), mask.numpy())).to(src.dtype)
-                if debug_mode:
-                    log_tensor(f"extra_level.src[{l}]", src, force=True)
-                    log_tensor(f"extra_level.mask[{l}]", mask, force=True)
-                    log_tensor(f"extra_level.pos[{l}]", pos_l, force=True)
+                pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype)
                 srcs.append(src)
                 masks.append(mask)
                 self.poss.append(pos_l)
 
         input_query_bbox = input_query_label = attn_mask = dn_meta = None
-        if debug_mode:
-            log_tensor("text_dict.encoded_text", text_dict["encoded_text"], force=True)
-            log_tensor("text_dict.text_token_mask", text_dict["text_token_mask"], force=True)
-            log_text(f"calling transformer with {len(srcs)} feature levels", force=True)
         hs, reference, hs_enc, ref_enc, init_box_proposal = self.transformer(
             srcs, masks, input_query_bbox, self.poss, input_query_label, attn_mask, text_dict
         )
@@ -374,10 +342,6 @@ class GroundingDINO(nn.Module):
             layer_outputs_unsig = layer_outputs_unsig.sigmoid()
             outputs_coord_list.append(layer_outputs_unsig)
         outputs_coord_list = jt.stack(outputs_coord_list)
-        if debug_mode:
-            log_tensor("decoder.hs.last", hs[-1], force=True)
-            log_tensor("decoder.reference.last", reference[-1], force=True)
-            log_tensor("decoder.outputs_coord.last", outputs_coord_list[-1], force=True)
 
         # output
         outputs_class = jt.stack(
@@ -387,10 +351,6 @@ class GroundingDINO(nn.Module):
             ]
         )
         out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord_list[-1]}
-        if debug_mode:
-            log_tensor("decoder.outputs_class.last", outputs_class[-1], force=True)
-            log_tensor("out.pred_logits", out["pred_logits"], force=True)
-            log_tensor("out.pred_boxes", out["pred_boxes"], force=True)
 
         # # for intermediate outputs
         # if self.aux_loss:
@@ -453,3 +413,4 @@ def build_groundingdino(args):
     )
 
     return model
+

@@ -4,10 +4,6 @@ import sys
 import bisect
 from pathlib import Path
 
-# Set Jittor environment variables before any import
-os.environ["nvcc_path"] = ""  # empty string stops jittor_utils.install_cuda
-os.environ["use_cuda"] = "0"
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 import numpy as np
 from PIL import Image
