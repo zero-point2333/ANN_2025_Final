@@ -50,11 +50,10 @@ def multi_scale_deformable_attn_pytorch(
         # (bs, H*W, heads, dim) -> (bs*heads, dim, H, W)
         value_l = (
             value_list[level]
-            .reshape(bs, H_ * W_, num_heads, embed_dims)
+            .reshape(bs, H_ * W_, num_heads * embed_dims)
             .transpose(1, 2)
             .reshape(bs * num_heads, embed_dims, H_, W_)
         )
-
         # (bs, queries, heads, points, 2)
         sampling_grid_l = (
             sampling_grids[:, :, :, level]
@@ -155,13 +154,19 @@ class MultiScaleDeformableAttention(nn.Module):
             2.0 * math.pi / self.num_heads
         )
         grid = jt.stack([thetas.cos(), thetas.sin()], dim=-1)
-        grid = grid / grid.abs().max(dim=-1, keepdims=True)[0]
+        den = grid.abs().max([-1], keepdims=True)
+        grid = grid / den
         grid = grid.reshape(self.num_heads, 1, 1, 2)
         grid = grid.repeat(1, self.num_levels, self.num_points, 1)
-
-        for i in range(self.num_points):
-            grid[:, :, i, :] *= i + 1
-
+        scales = jt.arange(1, self.num_points + 1, dtype=jt.float32).reshape(1, 1, self.num_points, 1)
+        grid = grid * scales
+        if hasattr(self.sampling_offsets, "bias") and self.sampling_offsets.bias is not None:
+            try:
+                self.sampling_offsets.bias.assign(grid.reshape(-1))
+            except Exception:
+                self.sampling_offsets.bias = grid.reshape((-1,))
+        else:
+            self.sampling_offsets.bias = nn.Parameter(grid.reshape(-1))
         self.sampling_offsets.bias = nn.Parameter(grid.reshape(-1))
 
         init.constant_(self.attention_weights.weight, 0.0)
@@ -200,10 +205,9 @@ class MultiScaleDeformableAttention(nn.Module):
         bs, num_value, _ = value.shape
 
         value = self.value_proj(value)
-
         if key_padding_mask is not None:
+            key_padding_mask = key_padding_mask.bool()
             value = value * jt.logical_not(key_padding_mask[..., None]).float()
-
         value = value.reshape(bs, num_value, self.num_heads, -1)
 
         sampling_offsets = self.sampling_offsets(query).reshape(

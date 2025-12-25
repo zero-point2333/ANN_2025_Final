@@ -113,6 +113,8 @@ def load_model(model_config_path, model_checkpoint_path, cpu_only=False):
     cleaned_sd = clean_state_dict(checkpoint["model"])
     model_sd = model.state_dict()
     filtered_sd = {k: v for k, v in cleaned_sd.items() if k in model_sd}
+    unfiltered_sd = {k: v for k, v in cleaned_sd.items() if k not in model_sd}
+    print(unfiltered_sd.keys())
     
     load_res = model.load_state_dict(filtered_sd)
     log_text(f"Loaded {len(filtered_sd)}/{len(cleaned_sd)} params")

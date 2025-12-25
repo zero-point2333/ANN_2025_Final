@@ -177,7 +177,7 @@ class GroundingDINO(nn.Module):
         class_embed_layerlist = [_class_embed for i in range(transformer.num_decoder_layers)]
         self.bbox_embed = nn.ModuleList(box_embed_layerlist)
         self.class_embed = nn.ModuleList(class_embed_layerlist)
-        self.transformer.decoder.bbox_embed = self.bbox_embed
+        self.transformer.decoder.bbox_embed = self.bbox_embed # can use deep copy to load more params
         self.transformer.decoder.class_embed = self.class_embed
 
         # two stage

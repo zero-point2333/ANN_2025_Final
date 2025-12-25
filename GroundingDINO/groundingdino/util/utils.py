@@ -33,7 +33,16 @@ def clean_state_dict(state_dict):
     for k, v in state_dict.items():
         if k[:7] == "module.":
             k = k[7:]  # remove `module.`
-        new_state_dict[k] = v
+        # Handle backbone naming difference: backbone.0 -> backbone.backbone
+        if k.startswith("backbone.0"):
+            k = k.replace("backbone.0", "backbone.backbone", 1)
+        if isinstance(v, torch.Tensor):
+            new_state_dict[k] = jt.array(v.detach().cpu().numpy())
+        elif isinstance(v, dict):
+            # Recursively clean nested dicts
+            new_state_dict[k] = clean_state_dict(v)
+        else:
+            new_state_dict[k] = v
     return new_state_dict
 
 
@@ -49,16 +58,16 @@ def renorm(
     if len(img.shape) == 3:
         assert img.shape[0] == 3, f'img.shape[0] should be 3 but {img.shape}'
         img_perm = img.permute(1, 2, 0)  # H,W,3
-        mean_var = jt.array(mean)
-        std_var = jt.array(std)
-        img_res = img_perm * std_var + mean_var
+        mean = jt.array(mean)
+        std = jt.array(std)
+        img_res = img_perm * std + mean
         return img_res.permute(2, 0, 1)
     else:
         assert img.shape[1] == 3, f'img.shape[1] should be 3 but {img.shape}'
         img_perm = img.permute(0, 2, 3, 1)  # B,H,W,3
-        mean_var = jt.array(mean)
-        std_var = jt.array(std)
-        img_res = img_perm * std_var + mean_var
+        mean = jt.array(mean)
+        std = jt.array(std)
+        img_res = img_perm * std + mean
         return img_res.permute(0, 3, 1, 2)
 
 

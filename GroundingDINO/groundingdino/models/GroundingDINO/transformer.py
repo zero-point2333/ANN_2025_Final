@@ -231,7 +231,7 @@ class Transformer(nn.Module):
             )
         # Ensure masks are jittor Vars (backbone emits numpy arrays)
         masks = [
-            m if isinstance(m, Var) else jt.array(m)
+            (m if isinstance(m, Var) else jt.array(m)).bool()
             for m in masks
         ]
         text_token_mask = text_dict["text_token_mask"].bool()
@@ -239,12 +239,6 @@ class Transformer(nn.Module):
         text_attention_mask = jt.logical_not(text_token_mask)
         if debug_mode:
             log_tensor("transformer.text_token_mask", text_token_mask, force=True)
-
-        # Fallback to single-stage path in CPU/strict environments
-        if self.two_stage_type == "standard":
-            self.two_stage_type = "no"
-            if getattr(self, "refpoint_embed", None) is None:
-                self.init_ref_points(self.num_queries)
 
         # prepare input for encoder
         src_flatten = []
@@ -261,12 +255,15 @@ class Transformer(nn.Module):
                 log_tensor(f"encoder.pos_embed[{lvl}]", pos_embed, force=True)
 
             src = src.flatten(2).transpose(1, 2)  # bs, hw, c
-            mask = mask.flatten(1)  # bs, hw
+            mask = mask.flatten(1).bool()
             pos_embed = pos_embed.flatten(2).transpose(1, 2)  # bs, hw, c
             if self.num_feature_levels > 1 and self.level_embed is not None:
                 lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
             else:
                 lvl_pos_embed = pos_embed
+            if not isinstance(mask, Var):
+                mask = jt.array(mask)
+                mask = mask.bool()
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             src_flatten.append(src)
             mask_flatten.append(mask)
@@ -291,6 +288,9 @@ class Transformer(nn.Module):
         #########################################################
         # Begin Encoder
         #########################################################
+        text_token_mask = text_dict["text_token_mask"]
+        text_token_mask = (text_token_mask > 0)
+        text_attention_mask = jt.logical_not(text_token_mask)
         memory, memory_text = self.encoder(
             src_flatten,
             pos=lvl_pos_embed_flatten,
@@ -330,15 +330,13 @@ class Transformer(nn.Module):
                 enc_outputs_class_unselected = self.enc_out_class_embed(output_memory, text_dict)
             else:
                 enc_outputs_class_unselected = self.enc_out_class_embed(output_memory)
-
-            topk_logits = enc_outputs_class_unselected.max(-1)[0]
+            m = enc_outputs_class_unselected.max(-1)
+            topk_logits = m[0] if isinstance(m, (tuple, list)) else m
             enc_outputs_coord_unselected = (
                 self.enc_out_bbox_embed(output_memory) + output_proposals
             )  # (bs, \sum{hw}, 4) unsigmoid
             topk = self.num_queries
-
-            topk_proposals = jt.topk(topk_logits, topk, dim=1)[1]  # bs, nq
-
+            topk_proposals = jt.topk(topk_logits, topk, dim=-1)[1]
             # gather boxes
             refpoint_embed_undetach = jt.gather(
                 enc_outputs_coord_unselected, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)
@@ -972,14 +970,11 @@ class DeformableTransformerDecoderLayer(nn.Module):
             tgt = self.norm2(tgt)
 
         if self.use_text_cross_attention:
-            memory_text_for_attn = memory_text
-            if memory_text_for_attn is not None and text_attention_mask is not None:
-                keep = jt.logical_not(text_attention_mask).transpose(0, 1).unsqueeze(-1).float()
-                memory_text_for_attn = memory_text_for_attn * keep
             tgt2 = self.ca_text(
                 self.with_pos_embed(tgt, tgt_query_pos),
-                memory_text_for_attn.transpose(0, 1),
-                memory_text_for_attn.transpose(0, 1),
+                memory_text.transpose(0, 1),
+                memory_text.transpose(0, 1),
+                key_padding_mask=text_attention_mask,
             )[0]
             tgt = tgt + self.catext_dropout(tgt2)
             tgt = self.catext_norm(tgt)

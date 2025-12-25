@@ -110,6 +110,9 @@ class TransformerEncoderLayer(nn.Module):
             src = src * keep
             if pos is not None:
                 pos = pos * keep
+        if src_mask is not None and src_mask.dim() == 3 and src_mask.shape[0] == src.shape[1]:
+            # bs, num_q, num_k
+            src_mask = src_mask.repeat(self.nhead, 1, 1)
 
         q = k = self.with_pos_embed(src, pos)
 

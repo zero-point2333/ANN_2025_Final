@@ -154,7 +154,7 @@ def _annotate_image(image_source, boxes, logits, phrases) -> Image.Image:
 device = "cuda" if USE_GPU else "cpu"
 checkpoint_path = _resolve_data_path(
     "weights",
-    "groundingdino_swint_ogc_legacy.pth",
+    "groundingdino_swint_ogc.pth",
     "GROUNDINGDINO_CHECKPOINT",
 )
 config_path = _resolve_data_path(
@@ -200,7 +200,7 @@ if os.environ.get("GROUNDINGDINO_SAVE_ANNOTATED", "1").lower() not in ("0", "fal
         annotated = _annotate_image(image_source, boxes, logits, phrases)
         out_path = os.environ.get(
             "GROUNDINGDINO_OUTPUT",
-            str(Path(__file__).resolve().parent / ".asset" / "local_test_out.jpg"),
+            str(Path(__file__).resolve().parent / "outputs" / "local_test_out.jpg"),
         )
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)

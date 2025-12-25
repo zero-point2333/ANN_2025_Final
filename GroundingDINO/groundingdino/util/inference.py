@@ -140,24 +140,13 @@ def _box_cxcywh_to_xyxy(boxes: np.ndarray) -> np.ndarray:
 def preprocess_caption(caption: str) -> str:
     result = caption.lower().strip()
     return result if result.endswith(".") else (result + ".")
-
-
 def _load_checkpoint_any(path: str) -> Dict[str, Any]:
-    """
-    Prefer torch.load for .pth (PyTorch zip serialization).
-    Fall back to jt.load for Jittor-native checkpoints.
-    """
-    # 1) If torch is available, try torch.load first for .pth/.pt
-    if torch is not None:
-        try:
-            return torch.load(path, map_location="cpu")
-        except Exception:
-            pass
-
-    # 2) Fall back to jt.load
+    ext = os.path.splitext(path)[1].lower()
+    if ext in [".pth", ".pt"]:
+        if torch is None:
+            raise RuntimeError(f"torch is required to load {ext} checkpoints: {path}")
+        return torch.load(path, map_location="cpu")
     return jt.load(path)
-
-
 def _extract_state_dict(ckpt: Any) -> Dict[str, Any]:
     if isinstance(ckpt, dict):
         if "model" in ckpt and isinstance(ckpt["model"], dict):
@@ -293,9 +282,7 @@ def _filter_by_model_shape_best_effort_jt(model: Any, sd_jt: Dict[str, Any]) -> 
         if k not in msd:
             skipped_keys.append(k)
             continue
-        if k not in param_names:
-            # Skip buffers
-            continue
+
         tgt = msd[k]
         tgt_shape = getattr(tgt, "shape", None)
         if tgt_shape is None:
@@ -369,11 +356,11 @@ def load_model(model_config_path: str, model_checkpoint_path: str, device: str =
         try:
             missing, unexpected = model.load_state_dict(sd_jt, strict=False)
             if debug_enabled():
-                log_text(f"load_state_dict succeeded, missing: {len(missing)}, unexpected: {len(unexpected)}", force=True)
+                log_text(f"missing sample: {[k for k in missing if 'bbox_embed' in k][:10]}", force=True)
+                log_text(f"unexpected sample: {[k for k in unexpected if 'bbox_embed' in k][:10]}", force=True)
         except Exception as e:
             if debug_enabled():
                 log_text(f"load_state_dict failed: {e}", force=True)
-
     if hasattr(model, "eval"):
         model.eval()
     return model
@@ -543,19 +530,19 @@ def predict(
     kept_phrases = []
 
     ids_np = np.array(input_ids)
-    attn_np = np.array(attention_mask) if attention_mask is not None else None
+    attn_np = np.array(attention_mask, dtype=bool) if attention_mask is not None else None
 
     for box, score, logit in zip(boxes, box_scores_np, logits):
         logit = logit[: len(ids_np)]
         text_mask = logit > text_threshold
         if attn_np is not None:
-            text_mask = text_mask & (attn_np.bool())
+            text_mask = text_mask & (attn_np)
         if forbidden_ids:
             text_mask = text_mask & (~np.isin(ids_np, list(forbidden_ids)))
         if not text_mask.any():
             continue
         phrase = get_phrases_from_posmap(
-            text_mask,
+            jt.array(text_mask),
             tokenized_phrase,
             tokenizer,
         ).replace(".", "").strip()
