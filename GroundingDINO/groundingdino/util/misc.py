@@ -147,6 +147,8 @@ class MetricLogger(object):
                 v = float(v.numpy())
             elif isinstance(v, np.generic):
                 v = float(v)
+            elif hasattr(v, "item"):
+                v = float(v.item())
             assert isinstance(v, (float, int)), f"Metric {k} must be float or int, got {type(v)}"
             self.meters[k].update(v)
 
@@ -365,6 +367,8 @@ def nested_tensor_from_tensor_list(tensor_list: List):
             np_img = img
         elif isinstance(img, jt.Var):
             np_img = img.numpy()
+        elif hasattr(img, "detach") and hasattr(img, "cpu") and hasattr(img, "numpy"):
+            np_img = img.detach().cpu().numpy()
         else:
             # fall back to numpy.asarray
             np_img = np.asarray(img)
@@ -517,28 +521,17 @@ def accuracy_onehot(pred, gt):
         gt:   array-like of shape (N, C)
 
     Returns:
-        jt.Var scalar, percentage.
+        Tensor-like scalar, percentage.
     """
-    if isinstance(pred, jt.Var):
-        pred_np = pred.numpy()
-    else:
-        pred_np = np.asarray(pred)
-
-    if isinstance(gt, jt.Var):
-        gt_np = gt.numpy()
-    else:
-        gt_np = np.asarray(gt)
-
-    if pred_np.shape != gt_np.shape:
-        raise ValueError(f"pred and gt must have same shape, got {pred_np.shape} vs {gt_np.shape}")
-
-    # row-wise equality (up to small numerical tolerance)
-    matches = np.all(np.abs(pred_np - gt_np) < 1e-4, axis=-1)
-    tp = matches.sum()
-    acc = float(tp) * 100.0 / float(gt_np.shape[0])
-    return jt.float32([acc])
-
-
+    if not (hasattr(pred, "abs") and hasattr(pred, "sum") and hasattr(pred, "float")):
+        pred = jt.array(pred)
+    if not (hasattr(gt, "abs") and hasattr(gt, "sum") and hasattr(gt, "float")):
+        gt = jt.array(gt)
+    if pred.shape != gt.shape:
+        raise ValueError(f"pred and gt must have same shape, got {pred.shape} vs {gt.shape}")
+    tp = ((pred - gt).abs().sum(-1) < 1e-4).float().sum()
+    acc = tp / gt.shape[0] * 100
+    return acc
 def interpolate(input, size=None, scale_factor=None, mode="nearest", align_corners=None):
     """
     Wrapper around jittor.nn.interpolate with a PyTorch-like signature.
@@ -551,8 +544,12 @@ def interpolate(input, size=None, scale_factor=None, mode="nearest", align_corne
         align_corners: forwarded to jittor.nn.interpolate for 'bilinear'
     """
     numpy_input = isinstance(input, np.ndarray)
+    torch_like_input = False
     if numpy_input:
         x = jt.array(input)
+    elif hasattr(input, "detach") and hasattr(input, "cpu") and hasattr(input, "numpy"):
+        torch_like_input = True
+        x = jt.array(input.detach().cpu().numpy())
     else:
         x = input
 
@@ -566,6 +563,8 @@ def interpolate(input, size=None, scale_factor=None, mode="nearest", align_corne
 
     if numpy_input:
         return out.numpy()
+    if torch_like_input and hasattr(input, "new_tensor"):
+        return input.new_tensor(out.numpy())
     return out
 
 
@@ -591,15 +590,21 @@ def inverse_sigmoid(x, eps=1e-3):
     Numerically stable inverse of the sigmoid, working on Jittor Var or numpy array.
     """
     if isinstance(x, jt.Var):
-        # clamp into (eps, 1-eps)
-        x1 = jt.clamp(x, eps, 1.0 - eps)
-        return jt.log(x1 / (1.0 - x1))
+        x = jt.clamp(x, 0.0, 1.0)
+        x1 = jt.clamp(x, eps, 1.0)
+        x2 = jt.clamp(1.0 - x, eps, 1.0)
+        return jt.log(x1 / x2)
+    if hasattr(x, "clamp") and hasattr(x, "log"):
+        x = x.clamp(min=0.0, max=1.0)
+        x1 = x.clamp(min=eps)
+        x2 = (1.0 - x).clamp(min=eps)
+        return (x1 / x2).log()
     else:
         x_arr = np.asarray(x, dtype=np.float32)
-        x_arr = np.clip(x_arr, eps, 1.0 - eps)
-        return np.log(x_arr / (1.0 - x_arr))
-
-
+        x_arr = np.clip(x_arr, 0.0, 1.0)
+        x1 = np.clip(x_arr, eps, None)
+        x2 = np.clip(1.0 - x_arr, eps, None)
+        return np.log(x1 / x2)
 def clean_state_dict(state_dict):
     import jittor as jt
     import torch

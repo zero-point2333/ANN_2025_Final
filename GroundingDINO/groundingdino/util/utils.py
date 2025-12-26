@@ -286,13 +286,13 @@ class APOPMeter:
         self.tp += jt.logical_and(pred == 1, gt == 1).sum().item()
         self.fp += jt.logical_and(pred == 1, gt == 0).sum().item()
         self.tn += jt.logical_and(pred == 0, gt == 0).sum().item()
-        self.tn += jt.logical_and(pred == 1, gt == 0).sum().item()
+        self.fn += jt.logical_and(pred == 0, gt == 1).sum().item()
 
     def update_cm(self, tp, fp, tn, fn):
         self.tp += tp
         self.fp += fp
         self.tn += tn
-        self.tn += fn
+        self.fn += fn
 
 
 def inverse_sigmoid(x, eps=1e-5):
@@ -383,9 +383,7 @@ def random_boxes(num=1, scale=1, rng=None):
         jt.Var: shape (n, 4) in x1, y1, x2, y2 format.
     """
     rng = ensure_rng(rng)
-
-    tlbr = rng.rand(num, 4).float()
-
+    tlbr = rng.rand(num, 4).astype(np.float32)
     tl_x = np.minimum(tlbr[:, 0], tlbr[:, 2])
     tl_y = np.minimum(tlbr[:, 1], tlbr[:, 3])
     br_x = np.maximum(tlbr[:, 0], tlbr[:, 2])
@@ -538,7 +536,7 @@ def get_phrases_from_posmap(
         posmap[0: left_idx + 1] = False
         posmap[right_idx:] = False
         non_zero_indices = posmap.nonzero()  # 返回形状为 [num_nonzero, ndim] 的张量
-        non_zero_idx = non_zero_indices[:, 0].tolist()  # 取所有行的第0列（第一个维度的索引）并转换为列表
+        non_zero_idx = non_zero_indices[:, 0].numpy().tolist()  # 取所有行的第0列（第一个维度的索引）并转换为列表
         
         token_ids = [tokenized["input_ids"][i] for i in non_zero_idx]
         return tokenizer.decode(token_ids)
