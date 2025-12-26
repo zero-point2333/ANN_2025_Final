@@ -117,29 +117,31 @@ class MultiScaleDeformableAttention(nn.Module):
         batch_first: bool = False,
     ):
         super().__init__()
-
         if embed_dim % num_heads != 0:
-            raise ValueError("embed_dim must be divisible by num_heads")
+            raise ValueError(
+                "embed_dim must be divisible by num_heads, but got {} and {}".format(
+                    embed_dim, num_heads
+                )
+            )
+        head_dim = embed_dim // num_heads
 
+        self.batch_first = batch_first
+
+        if not _is_power_of_2(head_dim):
+            warnings.warn(
+                """
+                You'd better set d_model in MSDeformAttn to make sure that
+                each dim of the attention head a power of 2, which is more efficient.
+                """
+            )
+
+        self.im2col_step = img2col_step
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.num_levels = num_levels
         self.num_points = num_points
-        self.batch_first = batch_first
-        self.im2col_step = img2col_step  # kept for interface compatibility
-
-        head_dim = embed_dim // num_heads
-        if not _is_power_of_2(head_dim):
-            warnings.warn(
-                "Attention head dimension is not power of 2, which may reduce efficiency."
-            )
-
-        self.sampling_offsets = nn.Linear(
-            embed_dim, num_heads * num_levels * num_points * 2
-        )
-        self.attention_weights = nn.Linear(
-            embed_dim, num_heads * num_levels * num_points
-        )
+        self.sampling_offsets = nn.Linear(embed_dim, num_heads * num_levels * num_points * 2)
+        self.attention_weights = nn.Linear(embed_dim, num_heads * num_levels * num_points)
         self.value_proj = nn.Linear(embed_dim, embed_dim)
         self.output_proj = nn.Linear(embed_dim, embed_dim)
 
@@ -153,22 +155,16 @@ class MultiScaleDeformableAttention(nn.Module):
         thetas = jt.arange(self.num_heads, dtype=jt.float32) * (
             2.0 * math.pi / self.num_heads
         )
-        grid = jt.stack([thetas.cos(), thetas.sin()], dim=-1)
-        den = grid.abs().max([-1], keepdims=True)
-        grid = grid / den
-        grid = grid.reshape(self.num_heads, 1, 1, 2)
-        grid = grid.repeat(1, self.num_levels, self.num_points, 1)
-        scales = jt.arange(1, self.num_points + 1, dtype=jt.float32).reshape(1, 1, self.num_points, 1)
-        grid = grid * scales
-        if hasattr(self.sampling_offsets, "bias") and self.sampling_offsets.bias is not None:
-            try:
-                self.sampling_offsets.bias.assign(grid.reshape(-1))
-            except Exception:
-                self.sampling_offsets.bias = grid.reshape((-1,))
-        else:
-            self.sampling_offsets.bias = nn.Parameter(grid.reshape(-1))
-        self.sampling_offsets.bias = nn.Parameter(grid.reshape(-1))
-
+        grid_init = jt.stack([thetas.cos(), thetas.sin()], dim=-1)
+        grid_init = (
+            (grid_init / grid_init.abs().max(-1, keepdim=True)[0])
+            .view(self.num_heads, 1, 1, 2)
+            .repeat(1, self.num_levels, self.num_points, 1)
+        )
+        for i in range(self.num_points):
+            grid_init[:, :, i, :] *= i + 1
+        with jt.no_grad():
+            self.sampling_offsets.bias = grid_init.view(-1)
         init.constant_(self.attention_weights.weight, 0.0)
         init.constant_(self.attention_weights.bias, 0.0)
         init.xavier_uniform_(self.value_proj.weight)
@@ -204,28 +200,31 @@ class MultiScaleDeformableAttention(nn.Module):
         bs, num_query, _ = query.shape
         bs, num_value, _ = value.shape
 
+        assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
+
         value = self.value_proj(value)
         if key_padding_mask is not None:
-            key_padding_mask = key_padding_mask.bool()
-            value = value * jt.logical_not(key_padding_mask[..., None]).float()
-        value = value.reshape(bs, num_value, self.num_heads, -1)
+            value = value.masked_fill(key_padding_mask[..., None], float(0))
+        value = value.view(bs, num_value, self.num_heads, -1)
 
-        sampling_offsets = self.sampling_offsets(query).reshape(
+        sampling_offsets = self.sampling_offsets(query).view(
             bs, num_query, self.num_heads, self.num_levels, self.num_points, 2
         )
 
-        attention_weights = self.attention_weights(query).reshape(
+        attention_weights = self.attention_weights(query).view(
             bs, num_query, self.num_heads, self.num_levels * self.num_points
         )
-        attention_weights = nn.softmax(attention_weights, dim=-1)
-        attention_weights = attention_weights.reshape(
-            bs, num_query, self.num_heads, self.num_levels, self.num_points
+        attention_weights = attention_weights.softmax(-1)
+        attention_weights = attention_weights.view(
+            bs,
+            num_query,
+            self.num_heads,
+            self.num_levels,
+            self.num_points,
         )
 
         if reference_points.shape[-1] == 2:
-            offset_normalizer = jt.stack(
-                [spatial_shapes[:, 1], spatial_shapes[:, 0]], dim=-1
-            )
+            offset_normalizer = jt.stack([spatial_shapes[..., 1], spatial_shapes[..., 0]], -1)
             sampling_locations = (
                 reference_points[:, :, None, :, None, :]
                 + sampling_offsets / offset_normalizer[None, None, None, :, None, :]
@@ -233,7 +232,8 @@ class MultiScaleDeformableAttention(nn.Module):
         elif reference_points.shape[-1] == 4:
             sampling_locations = (
                 reference_points[:, :, None, :, None, :2]
-                + sampling_offsets / self.num_points
+                + sampling_offsets
+                / self.num_points
                 * reference_points[:, :, None, :, None, 2:]
                 * 0.5
             )

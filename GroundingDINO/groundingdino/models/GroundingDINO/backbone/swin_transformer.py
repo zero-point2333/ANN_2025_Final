@@ -141,9 +141,7 @@ class WindowAttention(nn.Module):
         self.scale = qk_scale or head_dim**-0.5
 
         # define a parameter table of relative position bias
-        self.relative_position_bias_table = nn.Parameter(
-            jt.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads)
-        )  # 2*Wh-1 * 2*Ww-1, nH
+        self.relative_position_bias_table = jt.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads) # 2*Wh-1 * 2*Ww-1, nH
 
         # get pair-wise relative position index for each token inside the window
         coords_h = jt.arange(self.window_size[0])
@@ -609,9 +607,7 @@ class SwinTransformer(nn.Module):
                 pretrain_img_size[1] // patch_size[1],
             ]
 
-            self.absolute_pos_embed = nn.Parameter(
-                jt.zeros(1, embed_dim, patches_resolution[0], patches_resolution[1])
-            )
+            self.absolute_pos_embed = jt.zeros(1, embed_dim, patches_resolution[0], patches_resolution[1])
             # Jittor中没有trunc_normal_，使用高斯初始化
             trunc_normal_(self.absolute_pos_embed, std=0.02)
 

@@ -9,24 +9,6 @@ import jittor as jt
 import jittor.nn as nn
 
 
-class DropPath(nn.Module):
-    """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks)."""
-
-    def __init__(self, drop_prob: float = 0.0):
-        super().__init__()
-        self.drop_prob = drop_prob
-
-    def execute(self, x):
-        if self.drop_prob == 0.0 or not self.is_training():
-            return x
-        keep_prob = 1 - self.drop_prob
-        shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
-        random_tensor = jt.rand(shape, dtype=x.dtype)
-        random_tensor = (random_tensor < keep_prob).float()
-        # scale tensor
-        random_tensor = random_tensor / keep_prob
-        return x * random_tensor
-
 class FeatureResizer(nn.Module):
     """
     This class takes as input a set of embeddings of dimension C1 and outputs a set of
@@ -81,7 +63,7 @@ def func_attention(query, context, smooth=1, raw_feature_norm="softmax", eps=1e-
     if raw_feature_norm == "softmax":
         # --> (batch*sourceL, queryL)
         attn = attn.view(batch_size * sourceL, queryL)
-        attn = nn.softmax(attn, dim=-1)
+        attn = nn.softmax(attn)
         # --> (batch, sourceL, queryL)
         attn = attn.view(batch_size, sourceL, queryL)
     elif raw_feature_norm == "l2norm":
@@ -92,14 +74,14 @@ def func_attention(query, context, smooth=1, raw_feature_norm="softmax", eps=1e-
     else:
         raise ValueError("unknown first norm type:", raw_feature_norm)
     # --> (batch, queryL, sourceL)
-    attn = jt.transpose(attn, 1, 2)
+    attn = jt.contiguous(jt.transpose(attn, 1, 2))
     # --> (batch*queryL, sourceL)
     attn = attn.view(batch_size * queryL, sourceL)
-    attn = nn.softmax(attn * smooth, dim=-1)
+    attn = nn.softmax(attn * smooth)
     # --> (batch, queryL, sourceL)
     attn = attn.view(batch_size, queryL, sourceL)
     # --> (batch, sourceL, queryL)
-    attnT = jt.transpose(attn, 1, 2)
+    attnT = jt.contiguous(jt.transpose(attn, 1, 2))
 
     # --> (batch, d, sourceL)
     contextT = jt.transpose(context, 1, 2)
@@ -143,7 +125,7 @@ class BiMultiHeadAttention(nn.Module):
         self._reset_parameters()
 
     def _shape(self, tensor: jt.Var, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        return jt.contiguous(tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2))
 
     def _reset_parameters(self):
         nn.init.xavier_uniform_(self.v_proj.weight)
@@ -220,22 +202,22 @@ class BiMultiHeadAttention(nn.Module):
         # mask vison for language
         if attention_mask_v is not None:
             attention_mask_v = (
-                attention_mask_v[:, None, None, :].repeat(1, self.num_heads, 1, 1).reshape(-1, attention_mask_v.shape[-1])
+                attention_mask_v[:, None, None, :].repeat(1, self.num_heads, 1, 1).flatten(0, 1)
             )
-            attn_weights_l = jt.masked_fill(attention_mask_v, float("-inf"))
+            attn_weights_l = jt.masked_fill(attn_weights_l, attention_mask_v, float("-inf"))
 
         attn_weights_l = nn.softmax(attn_weights_l, dim=-1)
 
         # mask language for vision
         if attention_mask_l is not None:
             attention_mask_l = (
-                attention_mask_l[:, None, None, :].repeat(1, self.num_heads, 1, 1).reshape(-1, attention_mask_l.shape[-1])
+                attention_mask_l[:, None, None, :].repeat(1, self.num_heads, 1, 1).flatten(0, 1)
             )
-            attn_weights = jt.masked_fill(attention_mask_l, float("-inf"))
+            attn_weights = jt.masked_fill(attn_weights, attention_mask_l, float("-inf"))
         attn_weights_v = nn.softmax(attn_weights, dim=-1)
 
-        attn_probs_v = nn.dropout(attn_weights_v, p=self.dropout)
-        attn_probs_l = nn.dropout(attn_weights_l, p=self.dropout)
+        attn_probs_v = nn.dropout(attn_weights_v, p=self.dropout, is_train=self.is_training)
+        attn_probs_l = nn.dropout(attn_weights_l, p=self.dropout, is_train=self.is_training)
 
         attn_output_v = jt.bmm(attn_probs_v, value_l_states)
         attn_output_l = jt.bmm(attn_probs_l, value_v_states)
@@ -295,9 +277,9 @@ class BiAttentionBlock(nn.Module):
         )
 
         # add layer scale for training stability
-        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.gamma_v = nn.Parameter(init_values * jt.ones((v_dim)))
-        self.gamma_l = nn.Parameter(init_values * jt.ones((l_dim)))
+        self.drop_path = nn.Dropout(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.gamma_v = init_values * jt.ones((v_dim))
+        self.gamma_l = init_values * jt.ones((l_dim))
 
     def execute(self, v, l, attention_mask_v=None, attention_mask_l=None):
         v = self.layer_norm_v(v)

@@ -157,7 +157,7 @@ class Transformer(nn.Module):
 
         if num_feature_levels > 1:
             if self.num_encoder_layers > 0:
-                self.level_embed = nn.Parameter(jt.zeros((num_feature_levels, d_model)))
+                self.level_embed = jt.zeros((num_feature_levels, d_model)) # shape
             else:
                 self.level_embed = None
 
@@ -165,8 +165,7 @@ class Transformer(nn.Module):
         assert learnable_tgt_init, "why not learnable_tgt_init"
         self.embed_init_tgt = embed_init_tgt
         if (two_stage_type != "no" and embed_init_tgt) or (two_stage_type == "no"):
-            self.tgt_embed = nn.Embedding(self.num_queries, d_model)
-            self.tgt_embed.weight.gauss_()
+            self.tgt_embed = nn.Embedding(self.num_queries, d_model) # pre-gaussd
         else:
             self.tgt_embed = None
 
@@ -200,11 +199,9 @@ class Transformer(nn.Module):
             self.level_embed.gauss_()
 
     def get_valid_ratio(self, mask):
-        mask = mask.bool()
-        inv_mask = jt.logical_not(mask)
         _, H, W = mask.shape
-        valid_H = jt.sum(inv_mask[:, :, 0], 1)
-        valid_W = jt.sum(inv_mask[:, 0, :], 1)
+        valid_H = jt.sum(jt.logical_not(mask[:, :, 0]), 1)
+        valid_W = jt.sum(jt.logical_not(mask[:, 0, :]), 1)
         valid_ratio_h = valid_H.float() / H
         valid_ratio_w = valid_W.float() / W
         valid_ratio = jt.stack([valid_ratio_w, valid_ratio_h], -1)
@@ -288,9 +285,6 @@ class Transformer(nn.Module):
         #########################################################
         # Begin Encoder
         #########################################################
-        text_token_mask = text_dict["text_token_mask"]
-        text_token_mask = (text_token_mask > 0)
-        text_attention_mask = jt.logical_not(text_token_mask)
         memory, memory_text = self.encoder(
             src_flatten,
             pos=lvl_pos_embed_flatten,
@@ -330,13 +324,12 @@ class Transformer(nn.Module):
                 enc_outputs_class_unselected = self.enc_out_class_embed(output_memory, text_dict)
             else:
                 enc_outputs_class_unselected = self.enc_out_class_embed(output_memory)
-            m = enc_outputs_class_unselected.max(-1)
-            topk_logits = m[0] if isinstance(m, (tuple, list)) else m
+            topk_logits = enc_outputs_class_unselected.max(-1)[0]
             enc_outputs_coord_unselected = (
                 self.enc_out_bbox_embed(output_memory) + output_proposals
             )  # (bs, \sum{hw}, 4) unsigmoid
             topk = self.num_queries
-            topk_proposals = jt.topk(topk_logits, topk, dim=-1)[1]
+            topk_proposals = jt.topk(topk_logits, topk, dim=-1)[1] # original version is dim=1, but topk_logits has only 1 dimension. is there anything wrong in it?
             # gather boxes
             refpoint_embed_undetach = jt.gather(
                 enc_outputs_coord_unselected, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)
@@ -507,7 +500,7 @@ class TransformerEncoder(nn.Module):
         spatial_shapes_np = np.array(spatial_shapes)
         reference_points_list = []
         for lvl, (H_, W_) in enumerate(spatial_shapes_np):
-            H_int, W_int = int(H_), int(W_)
+            H_int, W_int = int(H_), int(W_) # change int32 to int
 
             ref_y, ref_x = jt.meshgrid(
                 jt.linspace(0.5, H_int - 0.5, H_int).float32(),
@@ -594,21 +587,12 @@ class TransformerEncoder(nn.Module):
             #     if os.environ.get('IPDB_SHILONG_DEBUG', None) == 'INFO':
             #         import ipdb; ipdb.set_trace()
             if self.fusion_layers:
-                if self.use_checkpoint:
-                    # Jittor doesn't have checkpoint, use normal forward
-                    output, memory_text = self.fusion_layers[layer_id](
-                        v=output,
-                        l=memory_text,
-                        attention_mask_v=None,
-                        attention_mask_l=None,
-                    )
-                else:
-                    output, memory_text = self.fusion_layers[layer_id](
-                        v=output,
-                        l=memory_text,
-                        attention_mask_v=None,
-                        attention_mask_l=None,
-                    )
+                output, memory_text = self.fusion_layers[layer_id](
+                    v=output,
+                    l=memory_text,
+                    attention_mask_v=key_padding_mask,
+                    attention_mask_l=text_attention_mask,
+                )
 
             if self.text_layers:
                 memory_text = self.text_layers[layer_id](
@@ -619,25 +603,14 @@ class TransformerEncoder(nn.Module):
                 ).transpose(0, 1)
 
             # main process
-            if self.use_transformer_ckpt:
-                # Jittor doesn't have checkpoint, use normal forward
-                output = layer(
-                    src=output,
-                    pos=pos,
-                    reference_points=reference_points,
-                    spatial_shapes=spatial_shapes,
-                    level_start_index=level_start_index,
-                    key_padding_mask=key_padding_mask,
-                )
-            else:
-                output = layer(
-                    src=output,
-                    pos=pos,
-                    reference_points=reference_points,
-                    spatial_shapes=spatial_shapes,
-                    level_start_index=level_start_index,
-                    key_padding_mask=key_padding_mask,
-                )
+            output = layer(
+                src=output,
+                pos=pos,
+                reference_points=reference_points,
+                spatial_shapes=spatial_shapes,
+                level_start_index=level_start_index,
+                key_padding_mask=key_padding_mask,
+            )
 
         return output, memory_text
 
@@ -655,7 +628,7 @@ class TransformerDecoder(nn.Module):
     ):
         super().__init__()
         if num_layers > 0:
-            self.layers = _get_clones(decoder_layer, num_layers, layer_share=False)
+            self.layers = _get_clones(decoder_layer, num_layers)
         else:
             self.layers = []
         self.num_layers = num_layers
@@ -956,10 +929,6 @@ class DeformableTransformerDecoderLayer(nn.Module):
             -
         """
         assert cross_attn_mask is None
-
-        if tgt_key_padding_mask is not None:
-            keep = jt.logical_not(tgt_key_padding_mask).transpose(0, 1).unsqueeze(-1).float()
-            tgt = tgt * keep
 
         # self attention
         if self.self_attn is not None:
