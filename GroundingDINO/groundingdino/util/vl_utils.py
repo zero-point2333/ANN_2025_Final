@@ -15,28 +15,26 @@ def create_positive_map_from_span(tokenized, token_span, max_text_len=256):
             - each item: [start_idx, end_idx]
     """
     # jt.Var, shape: (num_boxes, max_text_len)
-    positive_map = jt.zeros((len(token_span), max_text_len), dtype=jt.float32)
+    positive_map: jt.Var = jt.zeros((len(token_span), max_text_len), dtype=jt.float32)
 
     for j, tok_list in enumerate(token_span):
         for (beg, end) in tok_list:
             beg_pos = tokenized.char_to_token(beg)
             end_pos = tokenized.char_to_token(end - 1)
-
             if beg_pos is None:
                 try:
                     beg_pos = tokenized.char_to_token(beg + 1)
                     if beg_pos is None:
                         beg_pos = tokenized.char_to_token(beg + 2)
-                except Exception:
+                except:
                     beg_pos = None
             if end_pos is None:
                 try:
                     end_pos = tokenized.char_to_token(end - 2)
                     if end_pos is None:
                         end_pos = tokenized.char_to_token(end - 3)
-                except Exception:
+                except:
                     end_pos = None
-
             if beg_pos is None or end_pos is None:
                 continue
 
@@ -45,14 +43,9 @@ def create_positive_map_from_span(tokenized, token_span, max_text_len=256):
                 positive_map[j, beg_pos] = 1.0
                 break
             else:
-                # 对 [beg_pos, end_pos] 区间填 1
                 positive_map[j, beg_pos : end_pos + 1] = 1.0
 
-    row_sum = positive_map.sum(-1)  # (num_boxes,)
-    row_sum = row_sum.reshape(-1, 1)  # (num_boxes, 1)
-    positive_map = positive_map / (row_sum + 1e-6)
-
-    return positive_map
+    return positive_map / (positive_map.sum(-1)[:, None] + 1e-6)
 
 
 def build_captions_and_token_span(cat_list, force_lowercase):

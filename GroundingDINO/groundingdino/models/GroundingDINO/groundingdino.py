@@ -19,9 +19,7 @@ from typing import List
 
 import jittor as jt
 import jittor.nn as nn
-from transformers import AutoTokenizer, BertModel, BertTokenizer, RobertaModel, RobertaTokenizerFast
 from groundingdino.util import box_ops, get_tokenlizer
-from groundingdino.util.debug_tools import debug_enabled, log_tensor, log_text
 from groundingdino.util.misc import (
     NestedTensor,
     accuracy,
@@ -31,9 +29,6 @@ from groundingdino.util.misc import (
     is_dist_avail_and_initialized,
     nested_tensor_from_tensor_list,
 )
-from groundingdino.util.utils import get_phrases_from_posmap
-from groundingdino.util.visualizer import COCOVisualizer
-from groundingdino.util.vl_utils import create_positive_map_from_span
 
 from ..registry import MODULE_BUILD_FUNCS
 from .backbone import build_backbone
@@ -101,15 +96,12 @@ class GroundingDINO(nn.Module):
         self.dn_label_noise_ratio = dn_label_noise_ratio
         self.dn_labelbook_size = dn_labelbook_size
 
-        # label encoder for denoising
-        self.label_enc = nn.Embedding(dn_labelbook_size + 1, self.hidden_dim)
-
         # bert
         # init tokenizer
         self.tokenizer = get_tokenlizer.get_tokenlizer(text_encoder_type)
         self.bert = get_tokenlizer.get_pretrained_language_model(text_encoder_type)
-        self.bert.pooler.dense.weight.requires_grad = False
-        self.bert.pooler.dense.bias.requires_grad = False
+        self.bert.pooler.dense.weight.requires_grad_(False)
+        self.bert.pooler.dense.bias.requires_grad_(False)
         self.bert = BertModelWarper(bert_model=self.bert)
 
         self.feat_map = nn.Linear(self.bert.config.hidden_size, self.hidden_dim, bias=True)
@@ -248,7 +240,7 @@ class GroundingDINO(nn.Module):
 
         # encoder texts
         tokenized = self.tokenizer(captions, padding="longest", return_tensors="pt")
-        # Convert to Jittor tensors
+        # Convert to Jittor tensors; may encounter disconnection of grad calculation?
         tokenized = {k: jt.array(v.numpy()) for k, v in tokenized.items()}
         (
             text_self_attention_masks,
@@ -321,7 +313,7 @@ class GroundingDINO(nn.Module):
                 else:
                     src = self.input_proj[l](srcs[-1])
                 m = samples.mask
-                mask = nn.interpolate(jt.array(m)[None].float(), size=src.shape[-2:]).bool()[0]
+                mask = nn.interpolate(jt.array(m)[None].float(), size=src.shape[-2:], mode='nearest').bool()[0] # original torch.nn.F.interpolate is on 'nearest' mode
                 pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype)
                 srcs.append(src)
                 masks.append(mask)
@@ -368,11 +360,8 @@ class GroundingDINO(nn.Module):
             self.unset_image_tensor() ## If necessary
         return out
 
-    @jt.no_grad()
     def _set_aux_loss(self, outputs_class, outputs_coord):
-        # this is a workaround to make jittor happy, as jittor
-        # doesn't support dictionary with non-homogeneous values, such
-        # as a dict having both a Var and a list.
+        # jittor support dictionary with non-homogeneous values, such as a dict having both a Var and a list.
         return [
             {"pred_logits": a, "pred_boxes": b}
             for a, b in zip(outputs_class[:-1], outputs_coord[:-1])

@@ -20,38 +20,33 @@ from pycocotools import mask as maskUtils
 
 
 def renorm(
-    img, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-):
-    """
-    img: jt.Var with shape (3, H, W) or (B, 3, H, W)
-    return: jt.Var with the same shape as img
-    """
+    img: jt.Var, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+) -> jt.Var:
+    # img: tensor(3,H,W) or tensor(B,3,H,W)
+    # return: same as img
     assert img.ndim == 3 or img.ndim == 4, "img.ndim should be 3 or 4 but %d" % img.ndim
-
-    mean_var = jt.float32(mean)
-    std_var = jt.float32(std)
-
     if img.ndim == 3:
         # (3, H, W) -> (H, W, 3)
         assert img.shape[0] == 3, 'img.shape[0] should be 3 but "%d". (%s)' % (
             img.shape[0],
             str(img.shape),
         )
-        img_perm = img.transpose(1, 2, 0)
+        img_perm = img.permute(1, 2, 0)
+        mean = jt.float32(mean)
+        std = jt.float32(std)
         # broadcast along channel dimension
-        img_res = img_perm * std_var + mean_var
-        # (H, W, 3) -> (3, H, W)
-        return img_res.transpose(2, 0, 1)
-    else:
-        # (B, 3, H, W) -> (B, H, W, 3)
+        img_res: jt.Var = img_perm * std + mean
+        return img_res.permute(2, 0, 1)
+    else:  # img.dim() == 4
         assert img.shape[1] == 3, 'img.shape[1] should be 3 but "%d". (%s)' % (
             img.shape[1],
             str(img.shape),
         )
-        img_perm = img.transpose(0, 2, 3, 1)
-        img_res = img_perm * std_var + mean_var
-        # (B, H, W, 3) -> (B, 3, H, W)
-        return img_res.transpose(0, 3, 1, 2)
+        img_perm = img.permute(0, 2, 3, 1)
+        mean = jt.float32(mean)
+        std = jt.float32(std)
+        img_res: jt.Var = img_perm * std + mean
+        return img_res.permute(0, 3, 1, 2)
 
 
 class ColorMap:
@@ -103,7 +98,7 @@ class COCOVisualizer:
     def __init__(self, coco=None, tokenlizer=None) -> None:
         self.coco = coco
 
-    def visualize(self, img, tgt, caption=None, dpi=180, savedir="vis"):
+    def visualize(self, img: jt.Var, tgt: np.ndarray, caption=None, dpi=180, savedir="vis"):
         """
         img: jt.Var (3, H, W)
         tgt: make sure they are all on cpu / numpy.
@@ -113,11 +108,9 @@ class COCOVisualizer:
         plt.rcParams["font.size"] = "5"
         ax = plt.gca()
 
-        # 反标准化到 [0,1] / [0,255] 区间并转为 HWC
-        img = renorm(img).transpose(1, 2, 0)
-        # 显式转为 numpy
-        if hasattr(img, "data"):
-            img = img.data
+        img = renorm(img).permute(1, 2, 0)
+        # if hasattr(img, "data"):
+        #     img = img.data
         ax.imshow(img)
 
         self.addtgt(tgt)
@@ -232,7 +225,6 @@ class COCOVisualizer:
                 cm = ColorMap(basergb)
                 heatmap = cm(attn_map)
                 ax.imshow(heatmap)
-
         ax.set_axis_off()
 
     def showAnns(self, anns, draw_bbox=False):
