@@ -6,9 +6,10 @@
 # ------------------------------------------------------------------------
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 from .GroundingDINO import build_groundingdino
+from groundingdino.models.GroundingDINO.groundingdino import GroundingDINO
 
 
-def build_model(args):
+def build_model(args) -> GroundingDINO:
     # we use register to maintain models from catdet6 on.
     from .registry import MODULE_BUILD_FUNCS
 

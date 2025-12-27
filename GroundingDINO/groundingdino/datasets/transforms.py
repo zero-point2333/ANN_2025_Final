@@ -114,6 +114,7 @@ def resize(image, target, size, max_size=None): # used
         else:
             return get_size_with_aspect_ratio(image_size, size, max_size)
 
+    assert isinstance(image, PIL.Image.Image)
     size = get_size(image.size, size, max_size)[::-1]
     # PIL expects (width, height)
     rescaled_image = image.resize(size, resample=PIL.Image.BILINEAR)
@@ -301,6 +302,7 @@ class Normalize(object): # used
         self.std = std
 
     def __call__(self, image, target=None):
+        assert isinstance(image, np.ndarray)
         image = T.image_normalize(image, mean=self.mean, std=self.std)
         if target is None:
             return image, None

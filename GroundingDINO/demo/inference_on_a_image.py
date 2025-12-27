@@ -35,7 +35,7 @@ from groundingdino.util import box_ops
 from groundingdino.util.slconfig import SLConfig
 from groundingdino.util.utils import clean_state_dict, get_phrases_from_posmap
 from groundingdino.util.vl_utils import create_positive_map_from_span
-from groundingdino.util.debug_tools import log_text
+from groundingdino.util.debug_tools import log_text, log_tensor
 
 
 def plot_boxes_to_image(image_pil, tgt):
@@ -81,7 +81,7 @@ def plot_boxes_to_image(image_pil, tgt):
     return image_pil, mask
 
 
-def load_image(image_path):
+def load_image(image_path: str):
     # load image
     image_pil = Image.open(image_path).convert("RGB")  # load image
 
@@ -93,32 +93,37 @@ def load_image(image_path):
         ]
     )
     image, _ = transform(image_pil, None)  # 3, h, w
-    log_text(f"image type: {type(image)}, shape: {image.shape}")
+    assert isinstance(image, np.ndarray)
+    log_tensor("image", image)
     if hasattr(image, 'numpy'):
         image = jt.array(image.numpy())
     else:
         image = jt.array(image)
     # Add batch dimension
+    assert isinstance(image, jt.Var)
     image = jt.unsqueeze(image, 0)  # 1, 3, h, w
     return image_pil, image
 
 
 def load_model(model_config_path, model_checkpoint_path, cpu_only=False):
+    assert isinstance(model_config_path, str)
+    assert isinstance(model_checkpoint_path, str)
     args = SLConfig.fromfile(model_config_path)
+    assert isinstance(args, SLConfig)
     args.device = "cuda" if not cpu_only else "cpu"
     model = build_model(args)
+    print("model built")
     checkpoint = jt.load(model_checkpoint_path)
 
     # Clean and filter state dict
     cleaned_sd = clean_state_dict(checkpoint["model"])
     model_sd = model.state_dict()
     filtered_sd = {k: v for k, v in cleaned_sd.items() if k in model_sd}
-    # unfiltered_sd = {k: v for k, v in cleaned_sd.items() if k not in model_sd}
-    # print(unfiltered_sd.keys())
+    unfiltered_sd = {k: v for k, v in cleaned_sd.items() if k not in model_sd}
+    print(unfiltered_sd.keys())
     
-    load_res = model.load_state_dict(filtered_sd)
+    model.load_state_dict(filtered_sd)
     log_text(f"Loaded {len(filtered_sd)}/{len(cleaned_sd)} params")
-    log_text(load_res)
 
     _ = model.eval()
     return model
@@ -230,6 +235,10 @@ if __name__ == "__main__":
     os.makedirs(output_dir, exist_ok=True)
     # load image
     image_pil, image = load_image(image_path)
+    assert isinstance(image_pil, Image.Image)
+    assert isinstance(image, jt.Var)
+    log_tensor("image_pil", image_pil)
+    log_tensor("image", image)
     # load model
     model = load_model(config_file, checkpoint_path, cpu_only=args.cpu_only)
 

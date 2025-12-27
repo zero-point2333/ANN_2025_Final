@@ -38,10 +38,10 @@ def get_sine_pos_embed(
         pos_embed (jt.Var): shape: [..., n*num_pos_feats].
     """
     scale = 2 * math.pi
-    dim_t = jt.arange(num_pos_feats, dtype=jt.float32)
+    dim_t: jt.Var = jt.arange(num_pos_feats, dtype=jt.float32)
     dim_t = temperature ** (2 * (dim_t // 2) / num_pos_feats)
 
-    def sine_func(x: jt.Var):
+    def sine_func(x: jt.Var) -> jt.Var:
         sin_x = x * scale / dim_t
         sin_x = jt.stack((sin_x[..., 0::2].sin(), sin_x[..., 1::2].cos()), dim=3).flatten(2)
         return sin_x
@@ -169,9 +169,11 @@ class MLP(nn.Module):
             nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim])
         ])
 
-    def execute(self, x):
+    def execute(self, x) -> jt.Var:
+        assert isinstance(x, jt.Var)
         for i, layer in enumerate(self.layers):
             x = nn.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
+        assert isinstance(x, jt.Var)
         return x
 
 
@@ -181,17 +183,22 @@ def _get_activation_fn(activation, d_model=256, batch_dim=0):
         return nn.relu
     if activation == "gelu":
         return nn.gelu
-    if activation == "glu":
-        return nn.glu
+    if activation == "leaky_relu":
+        return nn.leaky_relu
     if activation == "prelu":
         return nn.PReLU()
-    if activation == "selu":
-        return nn.selu
+    if activation == "relu6":
+        return nn.relu6
+    if activation == "elu":
+        return nn.elu
+    if activation == "silu":
+        return nn.silu
 
     raise RuntimeError(f"activation should be relu/gelu, not {activation}.")
 
 
-def gen_sineembed_for_position(pos_tensor):
+def gen_sineembed_for_position(pos_tensor: jt.Var) -> jt.Var:
+    assert isinstance(pos_tensor, jt.Var)
     scale = 2 * math.pi
     dim_t = jt.arange(128, dtype=jt.float32)
     dim_t = 10000 ** (2 * (dim_t // 2) / 128)

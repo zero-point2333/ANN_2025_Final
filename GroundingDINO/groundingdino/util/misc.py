@@ -589,7 +589,7 @@ def inverse_sigmoid(x, eps=1e-3):
     """
     Numerically stable inverse of the sigmoid, working on Jittor Var or numpy array.
     """
-    if isinstance(x, jt.Var):
+    if isinstance(x, jt.Var): # always jt.Var
         x = jt.clamp(x, 0.0, 1.0)
         x1 = jt.clamp(x, eps, 1.0)
         x2 = jt.clamp(1.0 - x, eps, 1.0)

@@ -71,8 +71,8 @@ class TextTransformer(nn.Module):
 class TransformerEncoderLayer(nn.Module):
     def __init__(
         self,
-        d_model,
-        nhead,
+        d_model: int,
+        nhead: int,
         dim_feedforward=2048,
         dropout=0.1,
         activation="relu",
@@ -99,7 +99,7 @@ class TransformerEncoderLayer(nn.Module):
 
     def execute(
         self,
-        src,
+        src: jt.Var,
         src_mask: Optional[jt.Var] = None,
         src_key_padding_mask: Optional[jt.Var] = None,
         pos: Optional[jt.Var] = None,
@@ -122,4 +122,5 @@ class TransformerEncoderLayer(nn.Module):
         src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
         src = src + self.dropout2(src2)
         src = self.norm2(src)
+        assert isinstance(src, jt.Var)
         return src

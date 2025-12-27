@@ -25,7 +25,7 @@ from jittor.models import resnet
 
 from groundingdino.util.misc import NestedTensor, clean_state_dict, is_main_process
 
-from .position_encoding import build_position_encoding
+from .position_encoding import PositionEmbeddingLearned, PositionEmbeddingSineHW, build_position_encoding
 from .swin_transformer import build_swin_transformer
 
 class FrozenBatchNorm2d(nn.Module):
@@ -219,14 +219,15 @@ def build_backbone(args):
     
     """
     position_embedding = build_position_encoding(args)
+    assert isinstance(position_embedding, (PositionEmbeddingSineHW, PositionEmbeddingLearned))
     train_backbone = True
     if not train_backbone:
         raise ValueError("Please set lr_backbone > 0")
-    return_interm_indices = args.return_interm_indices
+    return_interm_indices: list = args.return_interm_indices
     assert return_interm_indices in [[0, 1, 2, 3], [1, 2, 3], [3]]
     
-    args.backbone_freeze_keywords
-    use_checkpoint = getattr(args, "use_checkpoint", False)
+    args.backbone_freeze_keywords # unused
+    use_checkpoint: bool = getattr(args, "use_checkpoint", False)
 
     if args.backbone in ["resnet50", "resnet101"]:
         backbone = Backbone(
@@ -238,7 +239,7 @@ def build_backbone(args):
         )
         bb_num_channels = backbone.num_channels
     elif args.backbone in [
-        "swin_T_224_1k",
+        "swin_T_224_1k", # we use this
         "swin_B_224_22k",
         "swin_B_384_22k",
         "swin_L_224_22k",

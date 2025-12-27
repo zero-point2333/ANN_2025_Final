@@ -16,7 +16,7 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 # ------------------------------------------------------------------------
 
-from typing import Optional
+from typing import List, Optional, Tuple
 import numpy as np
 
 import jittor as jt
@@ -157,7 +157,7 @@ class Transformer(nn.Module):
 
         if num_feature_levels > 1:
             if self.num_encoder_layers > 0:
-                self.level_embed = jt.zeros((num_feature_levels, d_model)) # shape
+                self.level_embed: jt.Var = jt.zeros((num_feature_levels, d_model)) # shape
             else:
                 self.level_embed = None
 
@@ -196,7 +196,7 @@ class Transformer(nn.Module):
             if isinstance(m, MSDeformAttn):
                 m.init_weights()
         if self.num_feature_levels > 1 and self.level_embed is not None:
-            self.level_embed.gauss_()
+            jt.init.gauss_(self.level_embed)
 
     def get_valid_ratio(self, mask):
         _, H, W = mask.shape
@@ -210,7 +210,7 @@ class Transformer(nn.Module):
     def init_ref_points(self, use_num_queries):
         self.refpoint_embed = nn.Embedding(use_num_queries, 4)
 
-    def execute(self, srcs, masks, refpoint_embed, pos_embeds, tgt, attn_mask=None, text_dict=None):
+    def execute(self, srcs: List[jt.Var], masks, refpoint_embed: Optional[jt.Var], pos_embeds: List[jt.Var], tgt: Optional[jt.Var], attn_mask=None, text_dict: Optional[dict]=None):
         """
         Input:
             - srcs: List of multi features [bs, ci, hi, wi]
@@ -220,22 +220,24 @@ class Transformer(nn.Module):
             - tgt: [bs, num_dn, d_model]. None in infer
 
         """
-        debug_mode = debug_enabled()
-        if debug_mode:
-            log_text(
-                f"Transformer.execute: levels={len(srcs)} two_stage={self.two_stage_type} num_queries={self.num_queries}",
-                force=True,
-            )
+        for feat__ in srcs:
+            assert isinstance(feat__, jt.Var)
+        for pos_embed__ in pos_embeds:
+            assert isinstance(pos_embed__, jt.Var)
+        assert not refpoint_embed or isinstance(refpoint_embed, jt.Var)
+        assert not tgt or isinstance(tgt, jt.Var)
+        log_text(
+            f"Transformer.execute: levels={len(srcs)} two_stage={self.two_stage_type} num_queries={self.num_queries}",
+        )
         # Ensure masks are jittor Vars (backbone emits numpy arrays)
-        masks = [
+        masks: List[jt.Var] = [
             (m if isinstance(m, Var) else jt.array(m)).bool()
             for m in masks
         ]
-        text_token_mask = text_dict["text_token_mask"].bool()
+        text_token_mask: jt.Var = text_dict["text_token_mask"].bool()
         text_dict["text_token_mask"] = text_token_mask
         text_attention_mask = jt.logical_not(text_token_mask)
-        if debug_mode:
-            log_tensor("transformer.text_token_mask", text_token_mask, force=True)
+        log_tensor("transformer.text_token_mask", text_token_mask)
 
         # prepare input for encoder
         src_flatten = []
@@ -246,10 +248,9 @@ class Transformer(nn.Module):
             bs, c, h, w = src.shape
             spatial_shape = (h, w)
             spatial_shapes.append(spatial_shape)
-            if debug_mode:
-                log_tensor(f"encoder.src[{lvl}]", src, force=True)
-                log_tensor(f"encoder.mask[{lvl}]", mask, force=True)
-                log_tensor(f"encoder.pos_embed[{lvl}]", pos_embed, force=True)
+            log_tensor(f"encoder.src[{lvl}]", src)
+            log_tensor(f"encoder.mask[{lvl}]", mask)
+            log_tensor(f"encoder.pos_embed[{lvl}]", pos_embed)
 
             src = src.flatten(2).transpose(1, 2)  # bs, hw, c
             mask = mask.flatten(1).bool()
@@ -273,11 +274,10 @@ class Transformer(nn.Module):
             (jt.zeros((1,), dtype=jt.int32), spatial_shapes.prod(1).cumsum(0)[:-1])
         )
         valid_ratios = jt.stack([self.get_valid_ratio(m) for m in masks], 1)
-        if debug_mode:
-            log_tensor("encoder.src_flatten", src_flatten, force=True)
-            log_tensor("encoder.mask_flatten", mask_flatten, force=True)
-            log_tensor("encoder.lvl_pos_embed_flatten", lvl_pos_embed_flatten, force=True)
-            log_tensor("encoder.valid_ratios", valid_ratios, force=True)
+        log_tensor("encoder.src_flatten", src_flatten)
+        log_tensor("encoder.mask_flatten", mask_flatten)
+        log_tensor("encoder.lvl_pos_embed_flatten", lvl_pos_embed_flatten)
+        log_tensor("encoder.valid_ratios", valid_ratios)
 
         # two stage
         enc_topk_proposals = enc_refpoint_embed = None
@@ -307,9 +307,8 @@ class Transformer(nn.Module):
         # - enc_intermediate_refpoints: None or (nenc+1, bs, nq, c) or (nenc, bs, nq, c)
         #########################################################
         text_dict["encoded_text"] = memory_text
-        if debug_mode:
-            log_tensor("encoder.memory", memory, force=True)
-            log_tensor("encoder.memory_text", memory_text, force=True)
+        log_tensor("encoder.memory", memory)
+        log_tensor("encoder.memory_text", memory_text)
         # if os.environ.get("SHILONG_AMP_INFNAN_DEBUG") == '1':
         #     if memory.isnan().any() | memory.isinf().any():
         #         import ipdb; ipdb.set_trace()
@@ -387,9 +386,8 @@ class Transformer(nn.Module):
         # - tgt: bs, NQ, d_model
         # - refpoint_embed(unsigmoid): bs, NQ, d_model
         #########################################################
-        if debug_mode:
-            log_tensor("decoder.tgt_pre", tgt, force=True)
-            log_tensor("decoder.refpoint_embed_pre", refpoint_embed, force=True)
+        log_tensor("decoder.tgt_pre", tgt)
+        log_tensor("decoder.refpoint_embed_pre", refpoint_embed)
 
         #########################################################
         # Begin Decoder
@@ -466,13 +464,16 @@ class TransformerEncoder(nn.Module):
         self.text_layers = []
         self.fusion_layers = []
         if num_layers > 0:
+            assert isinstance(encoder_layer, DeformableTransformerEncoderLayer)
             self.layers = _get_clones(encoder_layer, num_layers, layer_share=enc_layer_share)
 
             if text_enhance_layer is not None:
+                assert isinstance(text_enhance_layer, TransformerEncoderLayer)
                 self.text_layers = _get_clones(
                     text_enhance_layer, num_layers, layer_share=enc_layer_share
                 )
             if feature_fusion_layer is not None:
+                assert isinstance(feature_fusion_layer, BiAttentionBlock)
                 self.fusion_layers = _get_clones(
                     feature_fusion_layer, num_layers, layer_share=enc_layer_share
                 )
@@ -496,8 +497,8 @@ class TransformerEncoder(nn.Module):
         self.use_transformer_ckpt = use_transformer_ckpt
 
     @staticmethod
-    def get_reference_points(spatial_shapes, valid_ratios, device=None):
-        spatial_shapes_np = np.array(spatial_shapes)
+    def get_reference_points(spatial_shapes: jt.Var, valid_ratios: jt.Var, device=None) -> jt.Var:
+        spatial_shapes_np = spatial_shapes.numpy()
         reference_points_list = []
         for lvl, (H_, W_) in enumerate(spatial_shapes_np):
             H_int, W_int = int(H_), int(W_) # change int32 to int
@@ -506,12 +507,15 @@ class TransformerEncoder(nn.Module):
                 jt.linspace(0.5, H_int - 0.5, H_int).float32(),
                 jt.linspace(0.5, W_int - 0.5, W_int).float32(),
             )
-            ref_y = ref_y.reshape(-1)[None] / (valid_ratios[:, None, lvl, 1] * H_int)
-            ref_x = ref_x.reshape(-1)[None] / (valid_ratios[:, None, lvl, 0] * W_int)
-            ref = jt.stack((ref_x, ref_y), -1)
+            assert isinstance(ref_y, jt.Var)
+            assert isinstance(ref_x, jt.Var)
+            ref_y: jt.Var = ref_y.reshape(-1)[None] / (valid_ratios[:, None, lvl, 1] * H_int)
+            ref_x: jt.Var = ref_x.reshape(-1)[None] / (valid_ratios[:, None, lvl, 0] * W_int)
+            ref: jt.Var = jt.stack((ref_x, ref_y), -1)
             reference_points_list.append(ref)
         reference_points = jt.concat(reference_points_list, 1)
-        reference_points = reference_points[:, :, None] * valid_ratios[:, None]
+        reference_points: jt.Var = reference_points[:, :, None] * valid_ratios[:, None]
+        assert isinstance(reference_points, jt.Var)
         return reference_points
 
     def execute(
@@ -529,7 +533,7 @@ class TransformerEncoder(nn.Module):
         pos_text: jt.Var = None,
         text_self_attention_masks: jt.Var = None,
         position_ids: jt.Var = None,
-    ):
+    ) -> Tuple[jt.Var, jt.Var]:
         """
         Input:
             - src: [bs, sum(hi*wi), 256]
@@ -561,8 +565,8 @@ class TransformerEncoder(nn.Module):
 
         if self.text_layers:
             # generate pos_text
-            bs, n_text, text_dim = memory_text.shape
-            if pos_text is None and position_ids is None:
+            bs, n_text, _ = memory_text.shape
+            if pos_text is None and position_ids is None: # not happened
                 pos_text = (
                     jt.arange(n_text, dtype=jt.float32)
                     .unsqueeze(0)
@@ -586,6 +590,7 @@ class TransformerEncoder(nn.Module):
             # if output.isnan().any() or memory_text.isnan().any():
             #     if os.environ.get('IPDB_SHILONG_DEBUG', None) == 'INFO':
             #         import ipdb; ipdb.set_trace()
+            assert isinstance(layer, DeformableTransformerEncoderLayer)
             if self.fusion_layers:
                 output, memory_text = self.fusion_layers[layer_id](
                     v=output,
@@ -593,6 +598,7 @@ class TransformerEncoder(nn.Module):
                     attention_mask_v=key_padding_mask,
                     attention_mask_l=text_attention_mask,
                 )
+                assert isinstance(output, jt.Var) and isinstance(memory_text, jt.Var)
 
             if self.text_layers:
                 memory_text = self.text_layers[layer_id](
@@ -601,9 +607,10 @@ class TransformerEncoder(nn.Module):
                     src_key_padding_mask=text_attention_mask,
                     pos=(pos_text.transpose(0, 1) if pos_text is not None else None),
                 ).transpose(0, 1)
+                assert isinstance(memory_text, jt.Var)
 
             # main process
-            output = layer(
+            output: jt.Var = layer(
                 src=output,
                 pos=pos,
                 reference_points=reference_points,
@@ -612,6 +619,7 @@ class TransformerEncoder(nn.Module):
                 key_padding_mask=key_padding_mask,
             )
 
+        assert isinstance(output, jt.Var) and isinstance(memory_text, jt.Var)
         return output, memory_text
 
 
@@ -619,14 +627,15 @@ class TransformerDecoder(nn.Module):
     def __init__(
         self,
         decoder_layer,
-        num_layers,
-        norm=None,
+        num_layers: int,
+        norm: nn.LayerNorm=None,
         return_intermediate=False,
         d_model=256,
         query_dim=4,
         num_feature_levels=1,
     ):
         super().__init__()
+        assert isinstance(decoder_layer, DeformableTransformerDecoderLayer)
         if num_layers > 0:
             self.layers = _get_clones(decoder_layer, num_layers)
         else:
@@ -642,6 +651,7 @@ class TransformerDecoder(nn.Module):
         self.ref_point_head = MLP(query_dim // 2 * d_model, d_model, d_model, 2)
         self.query_pos_sine_scale = None
 
+        # next three will be loaded via checkpoint
         self.query_scale = None
         self.bbox_embed = None
         self.class_embed = None
@@ -652,8 +662,8 @@ class TransformerDecoder(nn.Module):
 
     def execute(
         self,
-        tgt,
-        memory,
+        tgt: jt.Var,
+        memory: jt.Var,
         tgt_mask: Optional[jt.Var] = None,
         memory_mask: Optional[jt.Var] = None,
         tgt_key_padding_mask: Optional[jt.Var] = None,
@@ -667,7 +677,7 @@ class TransformerDecoder(nn.Module):
         # for text
         memory_text: Optional[jt.Var] = None,
         text_attention_mask: Optional[jt.Var] = None,
-    ):
+    ) -> List[List[Var]]:
         """
         Input:
             - tgt: nq, bs, d_model
@@ -676,25 +686,25 @@ class TransformerDecoder(nn.Module):
             - refpoints_unsigmoid: nq, bs, 2/4
             - valid_ratios/spatial_shapes: bs, nlevel, 2
         """
-        debug_mode = debug_enabled()
+        assert isinstance(tgt, jt.Var)
+        assert isinstance(memory, jt.Var)
         output = tgt
 
         intermediate = []
         reference_points = refpoints_unsigmoid.sigmoid()
         ref_points = [reference_points]
-        if debug_mode:
-            log_tensor("decoder.init.output", output, force=True)
-            log_tensor("decoder.init.reference_points", reference_points, force=True)
-            log_tensor("decoder.init.memory", memory, force=True)
-            if pos is not None:
-                log_tensor("decoder.init.pos", pos, force=True)
-            if memory_text is not None:
-                log_tensor("decoder.init.memory_text", memory_text, force=True)
+        log_tensor("decoder.init.output", output)
+        log_tensor("decoder.init.reference_points", reference_points)
+        log_tensor("decoder.init.memory", memory)
+        if pos is not None:
+            log_tensor("decoder.init.pos", pos)
+        if memory_text is not None:
+            log_tensor("decoder.init.memory_text", memory_text)
 
         for layer_id, layer in enumerate(self.layers):
 
             if reference_points.shape[-1] == 4:
-                reference_points_input = (
+                reference_points_input: jt.Var = (
                     reference_points[:, :, None]
                     * jt.concat([valid_ratios, valid_ratios], -1)[None, :]
                 )  # nq, bs, nlevel, 4
@@ -706,20 +716,19 @@ class TransformerDecoder(nn.Module):
             )  # nq, bs, 256 * 2
 
             # conditional query
-            raw_query_pos = self.ref_point_head(query_sine_embed)  # nq, bs, 256
-            pos_scale = self.query_scale(output) if self.query_scale is not None else 1
-            query_pos = pos_scale * raw_query_pos
-            if debug_mode:
-                log_text(f"decoder.layer{layer_id}: start", force=True)
-                log_tensor(f"decoder.layer{layer_id}.reference_points_input", reference_points_input, force=True)
-                log_tensor(f"decoder.layer{layer_id}.query_sine_embed", query_sine_embed, force=True)
-                log_tensor(f"decoder.layer{layer_id}.query_pos", query_pos, force=True)
+            raw_query_pos: jt.Var = self.ref_point_head(query_sine_embed)  # nq, bs, 256
+            pos_scale = self.query_scale(output) if self.query_scale is not None else int(1)
+            query_pos: jt.Var = pos_scale * raw_query_pos
+            log_text(f"decoder.layer{layer_id}: start")
+            log_tensor(f"decoder.layer{layer_id}.reference_points_input", reference_points_input)
+            log_tensor(f"decoder.layer{layer_id}.query_sine_embed", query_sine_embed)
+            log_tensor(f"decoder.layer{layer_id}.query_pos", query_pos)
             # if os.environ.get("SHILONG_AMP_INFNAN_DEBUG") == '1':
             #     if query_pos.isnan().any() | query_pos.isinf().any():
             #         import ipdb; ipdb.set_trace()
 
             # main process
-            output = layer(
+            output: jt.Var = layer(
                 tgt=output,
                 tgt_query_pos=query_pos,
                 tgt_query_sine_embed=query_sine_embed,
@@ -735,8 +744,7 @@ class TransformerDecoder(nn.Module):
                 self_attn_mask=tgt_mask,
                 cross_attn_mask=memory_mask,
             )
-            if debug_mode:
-                log_tensor(f"decoder.layer{layer_id}.output", output, force=True)
+            log_tensor(f"decoder.layer{layer_id}.output", output)
             if output.isnan().any() | output.isinf().any():
                 print(f"output layer_id {layer_id} is nan")
                 try:
@@ -750,24 +758,25 @@ class TransformerDecoder(nn.Module):
 
             # iter update
             if self.bbox_embed is not None:
+                assert isinstance(self.bbox_embed, nn.Sequential)
                 reference_before_sigmoid = inverse_sigmoid(reference_points)
-                delta_unsig = self.bbox_embed[layer_id](output)
-                outputs_unsig = delta_unsig + reference_before_sigmoid
-                new_reference_points = outputs_unsig.sigmoid()
-                if debug_mode:
-                    log_tensor(f"decoder.layer{layer_id}.delta_unsig", delta_unsig, force=True)
-                    log_tensor(f"decoder.layer{layer_id}.reference_before_sigmoid", reference_before_sigmoid, force=True)
-                    log_tensor(f"decoder.layer{layer_id}.new_reference_points", new_reference_points, force=True)
+                delta_unsig: jt.Var = self.bbox_embed[layer_id](output)
+                outputs_unsig: jt.Var = delta_unsig + reference_before_sigmoid
+                new_reference_points: jt.Var = outputs_unsig.sigmoid()
+                log_tensor(f"decoder.layer{layer_id}.delta_unsig", delta_unsig)
+                log_tensor(f"decoder.layer{layer_id}.reference_before_sigmoid", reference_before_sigmoid)
+                log_tensor(f"decoder.layer{layer_id}.new_reference_points", new_reference_points)
 
-                reference_points = new_reference_points.detach()
+                reference_points: jt.Var = new_reference_points.detach() # detach is a copy without engaging into grad cal
                 # if layer_id != self.num_layers - 1:
                 ref_points.append(new_reference_points)
 
             intermediate.append(self.norm(output))
 
-        if debug_mode:
-            log_tensor("decoder.final.output", output, force=True)
-            log_text(f"decoder.final ref_points={len(ref_points)} layers={len(intermediate)}", force=True)
+        for itm_out in intermediate:
+            assert isinstance(itm_out, jt.Var)
+        log_tensor("decoder.final.output", output)
+        log_text(f"decoder.final ref_points={len(ref_points)} layers={len(intermediate)}")
         return [
             [itm_out.transpose(0, 1) for itm_out in intermediate],
             [itm_refpoint.transpose(0, 1) for itm_refpoint in ref_points],
@@ -807,10 +816,11 @@ class DeformableTransformerEncoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(d_model)
 
     @staticmethod
-    def with_pos_embed(tensor, pos):
+    def with_pos_embed(tensor: jt.Var, pos: Optional[jt.Var]):
         return tensor if pos is None else tensor + pos
 
     def forward_ffn(self, src):
+        assert isinstance(src, jt.Var)
         src2 = self.linear2(self.dropout2(self.activation(self.linear1(src))))
         src = src + self.dropout3(src2)
         src = self.norm2(src)
@@ -818,9 +828,15 @@ class DeformableTransformerEncoderLayer(nn.Module):
 
     def execute(
         self, src, pos, reference_points, spatial_shapes, level_start_index, key_padding_mask=None
-    ):
+    ) -> jt.Var:
         # self attention
         # import ipdb; ipdb.set_trace()
+        assert isinstance(src, jt.Var)
+        assert isinstance(pos, jt.Var)
+        assert isinstance(reference_points, jt.Var)
+        assert isinstance(spatial_shapes, jt.Var)
+        assert isinstance(level_start_index, jt.Var)
+        assert isinstance(key_padding_mask, (jt.Var, None))
         src2 = self.self_attn(
             query=self.with_pos_embed(src, pos),
             reference_points=reference_points,
@@ -829,11 +845,13 @@ class DeformableTransformerEncoderLayer(nn.Module):
             level_start_index=level_start_index,
             key_padding_mask=key_padding_mask,
         )
+        assert isinstance(src2, jt.Var)
         src = src + self.dropout1(src2)
         src = self.norm1(src)
 
         # ffn
         src = self.forward_ffn(src)
+        assert isinstance(src, jt.Var)
 
         return src
 
@@ -888,19 +906,21 @@ class DeformableTransformerDecoderLayer(nn.Module):
         assert not use_text_feat_guide
         self.use_text_cross_attention = use_text_cross_attention
 
-    def rm_self_attn_modules(self):
+    def rm_self_attn_modules(self): # unused
         self.self_attn = None
         self.dropout2 = None
         self.norm2 = None
 
     @staticmethod
-    def with_pos_embed(tensor, pos):
+    def with_pos_embed(tensor: jt.Var, pos: Optional[jt.Var]):
         return tensor if pos is None else tensor + pos
 
-    def forward_ffn(self, tgt):
+    def forward_ffn(self, tgt) -> jt.Var:
+        assert isinstance(tgt, jt.Var)
         tgt2 = self.linear2(self.dropout3(self.activation(self.linear1(tgt))))
         tgt = tgt + self.dropout4(tgt2)
         tgt = self.norm3(tgt)
+        assert isinstance(tgt, jt.Var)
         return tgt
 
     def execute(
@@ -922,7 +942,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
         # sa
         self_attn_mask: Optional[jt.Var] = None,  # mask used for self-attention
         cross_attn_mask: Optional[jt.Var] = None,  # mask used for cross-attention
-    ):
+    ) -> jt.Var:
         """
         Input:
             - tgt/tgt_query_pos: nq, bs, d_model
@@ -934,7 +954,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
         if self.self_attn is not None:
             # import ipdb; ipdb.set_trace()
             q = k = self.with_pos_embed(tgt, tgt_query_pos)
-            tgt2 = self.self_attn(q, k, tgt, attn_mask=self_attn_mask)[0]
+            tgt2: jt.Var = self.self_attn(q, k, tgt, attn_mask=self_attn_mask)[0]
             tgt = tgt + self.dropout2(tgt2)
             tgt = self.norm2(tgt)
 
@@ -950,7 +970,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
 
         tgt2 = self.cross_attn(
             query=self.with_pos_embed(tgt, tgt_query_pos).transpose(0, 1),
-            reference_points=tgt_reference_points.transpose(0, 1).contiguous(),
+            reference_points=jt.contiguous(tgt_reference_points.transpose(0, 1)),
             value=memory.transpose(0, 1),
             spatial_shapes=memory_spatial_shapes,
             level_start_index=memory_level_start_index,
@@ -958,6 +978,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
         ).transpose(0, 1)
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
+        assert isinstance(tgt, jt.Var)
 
         # ffn
         tgt = self.forward_ffn(tgt)

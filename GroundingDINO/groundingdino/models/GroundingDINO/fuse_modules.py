@@ -5,6 +5,7 @@
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
 
+from typing import Optional, Tuple
 import jittor as jt
 import jittor.nn as nn
 
@@ -124,7 +125,7 @@ class BiMultiHeadAttention(nn.Module):
 
         self._reset_parameters()
 
-    def _shape(self, tensor: jt.Var, seq_len: int, bsz: int):
+    def _shape(self, tensor: jt.Var, seq_len: int, bsz: int) -> jt.Var:
         return jt.contiguous(tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2))
 
     def _reset_parameters(self):
@@ -141,7 +142,7 @@ class BiMultiHeadAttention(nn.Module):
         nn.init.xavier_uniform_(self.out_l_proj.weight)
         nn.init.zero_(self.out_l_proj.bias)
 
-    def execute(self, v, l, attention_mask_v=None, attention_mask_l=None):
+    def execute(self, v: jt.Var, l: jt.Var, attention_mask_v: Optional[jt.Var], attention_mask_l: Optional[jt.Var]):
         """_summary_
 
         Args:
@@ -157,19 +158,19 @@ class BiMultiHeadAttention(nn.Module):
         #     import ipdb; ipdb.set_trace()
         bsz, tgt_len, _ = v.shape
 
-        query_states = self.v_proj(v) * self.scale
+        query_states: jt.Var = self.v_proj(v) * self.scale
         key_states = self._shape(self.l_proj(l), -1, bsz)
         value_v_states = self._shape(self.values_v_proj(v), -1, bsz)
         value_l_states = self._shape(self.values_l_proj(l), -1, bsz)
 
         proj_shape = (bsz * self.num_heads, -1, self.head_dim)
         query_states = self._shape(query_states, tgt_len, bsz).view(*proj_shape)
-        key_states = key_states.view(*proj_shape)
-        value_v_states = value_v_states.view(*proj_shape)
-        value_l_states = value_l_states.view(*proj_shape)
+        key_states: jt.Var = key_states.view(*proj_shape)
+        value_v_states: jt.Var = value_v_states.view(*proj_shape)
+        value_l_states: jt.Var = value_l_states.view(*proj_shape)
 
         src_len = key_states.shape[1]
-        attn_weights = jt.bmm(query_states, key_states.transpose(1, 2))  # bs*nhead, nimg, ntxt
+        attn_weights: jt.Var = jt.bmm(query_states, key_states.transpose(1, 2))  # bs*nhead, nimg, ntxt
 
         if attn_weights.shape != (bsz * self.num_heads, tgt_len, src_len):
             raise ValueError(
@@ -177,7 +178,7 @@ class BiMultiHeadAttention(nn.Module):
             )
 
         if self.stable_softmax_2d:
-            attn_weights = attn_weights - attn_weights.max()
+            attn_weights: jt.Var = attn_weights - attn_weights.max()
 
         if self.clamp_min_for_underflow:
             attn_weights = jt.clamp(
@@ -188,8 +189,8 @@ class BiMultiHeadAttention(nn.Module):
                 attn_weights, max_v=50000
             )  # Do not increase 50000, data type half has quite limited range
 
-        attn_weights_T = attn_weights.transpose(1, 2)
-        attn_weights_l = attn_weights_T - attn_weights_T.max(dim=-1, keepdims=True)[0]
+        attn_weights_T: jt.Var = attn_weights.transpose(1, 2)
+        attn_weights_l: jt.Var = attn_weights_T - attn_weights_T.max(dim=-1, keepdims=True)[0]
         if self.clamp_min_for_underflow:
             attn_weights_l = jt.clamp(
                 attn_weights_l, min_v=-50000
@@ -204,23 +205,23 @@ class BiMultiHeadAttention(nn.Module):
             attention_mask_v = (
                 attention_mask_v[:, None, None, :].repeat(1, self.num_heads, 1, 1).flatten(0, 1)
             )
-            attn_weights_l = jt.masked_fill(attn_weights_l, attention_mask_v, float("-inf"))
+            attn_weights_l: jt.Var = jt.masked_fill(attn_weights_l, attention_mask_v, float("-inf"))
 
-        attn_weights_l = nn.softmax(attn_weights_l, dim=-1)
+        attn_weights_l: jt.Var = nn.softmax(attn_weights_l, dim=-1)
 
         # mask language for vision
         if attention_mask_l is not None:
-            attention_mask_l = (
+            attention_mask_l = ( # though it has no highlight, it can actually work out
                 attention_mask_l[:, None, None, :].repeat(1, self.num_heads, 1, 1).flatten(0, 1)
             )
             attn_weights = jt.masked_fill(attn_weights, attention_mask_l, float("-inf"))
-        attn_weights_v = nn.softmax(attn_weights, dim=-1)
+        attn_weights_v: jt.Var = nn.softmax(attn_weights, dim=-1)
 
-        attn_probs_v = nn.dropout(attn_weights_v, p=self.dropout, is_train=self.is_training)
-        attn_probs_l = nn.dropout(attn_weights_l, p=self.dropout, is_train=self.is_training)
+        attn_probs_v: jt.Var = nn.dropout(attn_weights_v, p=self.dropout, is_train=self.is_training)
+        attn_probs_l: jt.Var = nn.dropout(attn_weights_l, p=self.dropout, is_train=self.is_training)
 
-        attn_output_v = jt.bmm(attn_probs_v, value_l_states)
-        attn_output_l = jt.bmm(attn_probs_l, value_v_states)
+        attn_output_v: jt.Var = jt.bmm(attn_probs_v, value_l_states)
+        attn_output_l: jt.Var = jt.bmm(attn_probs_l, value_v_states)
 
         if attn_output_v.shape != (bsz * self.num_heads, tgt_len, self.head_dim):
             raise ValueError(
@@ -250,10 +251,10 @@ class BiMultiHeadAttention(nn.Module):
 class BiAttentionBlock(nn.Module):
     def __init__(
         self,
-        v_dim,
-        l_dim,
-        embed_dim,
-        num_heads,
+        v_dim: int,
+        l_dim: int,
+        embed_dim: int,
+        num_heads: int,
         dropout=0.1,
         drop_path=0.0,
         init_values=1e-4,
@@ -278,15 +279,17 @@ class BiAttentionBlock(nn.Module):
 
         # add layer scale for training stability
         self.drop_path = nn.Dropout(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.gamma_v = init_values * jt.ones((v_dim))
-        self.gamma_l = init_values * jt.ones((l_dim))
+        self.gamma_v: jt.Var = init_values * jt.ones((v_dim))
+        self.gamma_l: jt.Var = init_values * jt.ones((l_dim))
 
-    def execute(self, v, l, attention_mask_v=None, attention_mask_l=None):
+    def execute(self, v: jt.Var, l: jt.Var, attention_mask_v: Optional[jt.Var], attention_mask_l: Optional[jt.Var]) -> Tuple[jt.Var, jt.Var]:
         v = self.layer_norm_v(v)
         l = self.layer_norm_l(l)
         delta_v, delta_l = self.attn(
             v, l, attention_mask_v=attention_mask_v, attention_mask_l=attention_mask_l
         )
+        assert isinstance(delta_v, jt.Var)
+        assert isinstance(delta_l, jt.Var)
         # v, l = v + delta_v, l + delta_l
         v = v + self.drop_path(self.gamma_v * delta_v)
         l = l + self.drop_path(self.gamma_l * delta_l)

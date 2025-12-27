@@ -37,8 +37,8 @@ from .bertwarper import (
     generate_masks_with_special_tokens,
     generate_masks_with_special_tokens_and_transfer_map,
 )
-from .transformer import build_transformer
-from .utils import MLP, ContrastiveEmbed, sigmoid_focal_loss
+from .transformer import Transformer, build_transformer
+from .utils import MLP, ContrastiveEmbed
 
 
 class GroundingDINO(nn.Module):
@@ -47,7 +47,7 @@ class GroundingDINO(nn.Module):
     def __init__(
         self,
         backbone,
-        transformer,
+        transformer: Transformer,
         num_queries,
         aux_loss=False,
         iter_update=False,
@@ -77,12 +77,12 @@ class GroundingDINO(nn.Module):
             aux_loss: True if auxiliary decoding losses (loss at each decoder layer) are to be used.
         """
         super().__init__()
-        self.num_queries = num_queries
+        self.num_queries: int = num_queries
         self.transformer = transformer
         self.hidden_dim = hidden_dim = transformer.d_model
         self.num_feature_levels = num_feature_levels
         self.nheads = nheads
-        self.max_text_len = 256
+        self.max_text_len = max_text_len
         self.sub_sentence_present = sub_sentence_present
 
         # setting query dim
@@ -374,9 +374,9 @@ def build_groundingdino(args):
     backbone = build_backbone(args)
     transformer = build_transformer(args)
 
-    dn_labelbook_size = args.dn_labelbook_size
-    dec_pred_bbox_embed_share = args.dec_pred_bbox_embed_share
-    sub_sentence_present = args.sub_sentence_present
+    dn_labelbook_size: int = args.dn_labelbook_size
+    dec_pred_bbox_embed_share: bool = args.dec_pred_bbox_embed_share
+    sub_sentence_present: bool = args.sub_sentence_present
 
     model = GroundingDINO(
         backbone,

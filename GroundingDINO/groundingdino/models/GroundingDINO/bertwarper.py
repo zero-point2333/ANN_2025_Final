@@ -6,15 +6,16 @@
 # ------------------------------------------------------------------------
 
 import jittor as jt
-import jittor.nn as F
 from jittor import nn
 from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
+from transformers import BertModel
 
 
 class BertModelWarper(nn.Module):
     def __init__(self, bert_model):
         super().__init__()
         # self.bert = bert_modelc
+        assert isinstance(bert_model, BertModel)
 
         # 这里的模块直接引用transformers的BertModel，输入的参数都应该是pytorch的tensor
         self.config = bert_model.config
