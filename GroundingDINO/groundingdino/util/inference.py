@@ -180,7 +180,7 @@ def _try_load_bert_weights(model: Any, full_state_dict: Dict[str, Any]) -> None:
     if torch is None:
         return
     bert = getattr(model, "bert", None)
-    if bert is None or not hasattr(bert, "load_state_dict"):
+    if bert is None:
         return
 
     bert_sd = {k[len("bert."):]: v for k, v in full_state_dict.items() if k.startswith("bert.")}
@@ -188,7 +188,19 @@ def _try_load_bert_weights(model: Any, full_state_dict: Dict[str, Any]) -> None:
         return
 
     try:
-        bert.load_state_dict(bert_sd, strict=False)
+        bert_sd_torch = {}
+        for k, v in bert_sd.items():
+            if torch.is_tensor(v):
+                bert_sd_torch[k] = v.detach().cpu()
+            elif isinstance(v, jt.Var):
+                bert_sd_torch[k] = torch.from_numpy(v.numpy())
+            else:
+                bert_sd_torch[k] = torch.from_numpy(np.asarray(v))
+
+        if hasattr(bert, "load_bert_state_dict"):
+            bert.load_bert_state_dict(bert_sd_torch, strict=False)
+        elif hasattr(bert, "load_state_dict"):
+            bert.load_state_dict(bert_sd_torch, strict=False)
     except Exception:
         # keep best-effort; do not block the whole model
         pass
@@ -351,10 +363,15 @@ def load_model(model_config_path: str, model_checkpoint_path: str, device: str =
                 f"(bert params skipped: {total_keys - len(full_sd)} not counted)",
                 force=True,
             )
-
-        # Use load_state_dict with Jittor tensors
         try:
-            missing, unexpected = model.load_state_dict(sd_jt, strict=False)
+            try:
+                load_res = model.load_state_dict(sd_jt, strict=False)
+            except TypeError:
+                load_res = model.load_state_dict(sd_jt)
+            if isinstance(load_res, tuple) and len(load_res) == 2:
+                missing, unexpected = load_res
+            else:
+                missing, unexpected = [], []
             if debug_enabled():
                 log_text(f"missing sample: {[k for k in missing if 'bbox_embed' in k][:10]}", force=True)
                 log_text(f"unexpected sample: {[k for k in unexpected if 'bbox_embed' in k][:10]}", force=True)

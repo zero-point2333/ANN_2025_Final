@@ -9,16 +9,18 @@ from PIL import Image, ImageDraw, ImageFont
 # CPU-only hard switches
 # (MUST be set before importing groundingdino.util.inference which imports jittor)
 # =======================
+CPU_ONLY_FLAG = "--cpu-only" in sys.argv
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_DATASETS_OFFLINE"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # 1) Tell Jittor "do NOT use cuda" via flag-style env var
-os.environ["use_cuda"] = "0"                      # Jittor flag name
-# 2) Prevent CUDA toolchain auto-enable / auto-download
-os.environ["nvcc_path"] = ""                      # empty string stops jittor_utils.install_cuda
-# 3) Hide GPUs from CUDA runtime (use empty string; avoid -1 which can be quirky)
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
+if CPU_ONLY_FLAG:
+    os.environ["use_cuda"] = "0"
+    # 2) Prevent CUDA toolchain auto-enable / auto-download
+    os.environ["nvcc_path"] = ""
+    # 3) Hide GPUs from CUDA runtime (use empty string; avoid -1 which can be quirky)
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
 # 4) Avoid multiprocess compiler pool (sandbox blocks semaphores)
 os.environ["DISABLE_MULTIPROCESSING"] = "1"
 # 5) Point Jittor at the right pythonX.Y-config so it won't try to compile against system python
@@ -94,6 +96,7 @@ def load_image(image_path: str):
     )
     image, _ = transform(image_pil, None)  # 3, h, w
     assert isinstance(image, np.ndarray)
+    log_text(f"load_image: raw type={type(image)}")
     log_tensor("image", image)
     if hasattr(image, 'numpy'):
         image = jt.array(image.numpy())
@@ -101,6 +104,7 @@ def load_image(image_path: str):
         image = jt.array(image)
     # Add batch dimension
     assert isinstance(image, jt.Var)
+    log_text(f"load_image: jt type={type(image)}")
     image = jt.unsqueeze(image, 0)  # 1, 3, h, w
     return image_pil, image
 
@@ -112,19 +116,69 @@ def load_model(model_config_path, model_checkpoint_path, cpu_only=False):
     assert isinstance(args, SLConfig)
     args.device = "cuda" if not cpu_only else "cpu"
     model = build_model(args)
+    log_text(f"load_model: cpu_only={cpu_only} jt.flags.use_cuda={jt.flags.use_cuda}")
     print("model built")
     checkpoint = jt.load(model_checkpoint_path)
-
+    if isinstance(checkpoint, dict):
+        state_dict = checkpoint.get("model", checkpoint.get("state_dict", checkpoint))
+    else:
+        state_dict = checkpoint
     # Clean and filter state dict
-    cleaned_sd = clean_state_dict(checkpoint["model"])
-    model_sd = model.state_dict()
-    filtered_sd = {k: v for k, v in cleaned_sd.items() if k in model_sd}
-    unfiltered_sd = {k: v for k, v in cleaned_sd.items() if k not in model_sd}
-    print(unfiltered_sd.keys())
-    
-    model.load_state_dict(filtered_sd)
-    log_text(f"Loaded {len(filtered_sd)}/{len(cleaned_sd)} params")
+    cleaned_sd = clean_state_dict(state_dict)
+    bert_sd = {k[len("bert."):]: v for k, v in cleaned_sd.items() if k.startswith("bert.")}
+    if bert_sd:
+        bert = getattr(model, "bert", None)
+        if bert is not None and hasattr(bert, "load_bert_state_dict"):
+            try:
+                bert.load_bert_state_dict(bert_sd, strict=False)
+            except Exception as exc:
+                log_text(f"bert load failed: {exc}")
+        else:
+            log_text("bert load skipped: model.bert missing or no load_bert_state_dict")
+    else:
+        log_text("bert load skipped: no bert.* keys in checkpoint")
 
+    non_bert_sd = {k: v for k, v in cleaned_sd.items() if not k.startswith("bert.")}
+    model_sd = model.state_dict()
+    filtered_sd = {}
+    shape_mismatch = []
+    for k, v in non_bert_sd.items():
+        if k not in model_sd:
+            continue
+        v_shape = getattr(v, "shape", None)
+        tgt_shape = getattr(model_sd[k], "shape", None)
+        if v_shape is not None and tgt_shape is not None and tuple(v_shape) != tuple(tgt_shape):
+            shape_mismatch.append(k)
+            continue
+        filtered_sd[k] = v
+    unfiltered_sd = {k: v for k, v in non_bert_sd.items() if k not in model_sd}
+    missing_in_ckpt = [k for k in model_sd.keys() if k not in non_bert_sd]
+    log_text(
+        f"state_dict: matched={len(filtered_sd)} total_non_bert={len(non_bert_sd)} "
+        f"bert={len(bert_sd)} unexpected={len(unfiltered_sd)} "
+        f"missing={len(missing_in_ckpt)} shape_mismatch={len(shape_mismatch)}"
+    )
+    if unfiltered_sd:
+        log_text(f"unexpected sample: {list(unfiltered_sd.keys())[:5]}")
+    if missing_in_ckpt:
+        log_text(f"missing sample: {missing_in_ckpt[:5]}")
+    if shape_mismatch:
+        log_text(f"shape mismatch sample: {shape_mismatch[:5]}")
+    try:
+        try:
+            load_res = model.load_state_dict(filtered_sd, strict=False)
+        except TypeError:
+            load_res = model.load_state_dict(filtered_sd)
+        if isinstance(load_res, tuple) and len(load_res) == 2:
+            missing, unexpected = load_res
+        else:
+            missing, unexpected = [], []
+        log_text(
+            f"Loaded {len(filtered_sd)}/{len(non_bert_sd)} non-bert params "
+            f"(missing={len(missing)}, unexpected={len(unexpected)})"
+        )
+    except Exception as exc:
+        log_text(f"load_state_dict failed: {exc}")
     _ = model.eval()
     return model
 
@@ -138,8 +192,13 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
     device = "cuda" if not cpu_only else "cpu"
     # model = model.to(device)  # Jittor does not have to() method
     # image = image.to(device)  # Jittor Var does not have to() method
+    log_text(f"get_grounding_output: image type={type(image)} caption type={type(caption)}")
+    assert isinstance(image, jt.Var)
     with jt.no_grad():
         outputs = model(image, captions=[caption])
+    log_text(f"get_grounding_output: outputs keys={list(outputs.keys())}")
+    assert isinstance(outputs["pred_logits"], jt.Var)
+    assert isinstance(outputs["pred_boxes"], jt.Var)
     logits = outputs["pred_logits"].sigmoid()[0]  # (nq, 256)
     boxes = outputs["pred_boxes"][0]  # (nq, 4)
 
@@ -147,7 +206,7 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
     if token_spans is None:
         logits_filt = logits.cpu().clone()
         boxes_filt = boxes.cpu().clone()
-        filt_mask = logits_filt.max(dim=1)[0] > box_threshold
+        filt_mask = logits_filt.max(dim=1) > box_threshold
         log_text(f"Overall filt_mask sum: {filt_mask.sum().item()}, box_threshold: {box_threshold}")
         logits_filt = logits_filt[filt_mask]  # num_filt, 256
         boxes_filt = boxes_filt[filt_mask]  # num_filt, 4
@@ -220,7 +279,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--cpu-only", action="store_true", help="running on cpu only!, default=False")
     args = parser.parse_args()
-
+    log_text(f"args.cpu_only={args.cpu_only} CPU_ONLY_FLAG={CPU_ONLY_FLAG} jt.flags.use_cuda={jt.flags.use_cuda}")
     # cfg
     config_file = args.config_file  # change the path of the model config file
     checkpoint_path = args.checkpoint_path  # change the path of the model

@@ -20,6 +20,7 @@ from typing import List
 import jittor as jt
 import jittor.nn as nn
 from groundingdino.util import box_ops, get_tokenlizer
+from groundingdino.util.debug_tools import log_text, log_tensor
 from groundingdino.util.misc import (
     NestedTensor,
     accuracy,
@@ -237,11 +238,15 @@ class GroundingDINO(nn.Module):
             captions = kw["captions"]
         else:
             captions = [t["caption"] for t in targets]
-
+        log_text(f"captions type={type(captions)} item0 type={type(captions[0]) if captions else None}")
         # encoder texts
         tokenized = self.tokenizer(captions, padding="longest", return_tensors="pt")
         # Convert to Jittor tensors; may encounter disconnection of grad calculation?
+        log_text(f"tokenized['input_ids'] raw type={type(tokenized['input_ids'])}")
         tokenized = {k: jt.array(v.numpy()) for k, v in tokenized.items()}
+        for key, value in tokenized.items():
+            log_text(f"tokenized[{key}] jt type={type(value)}")
+            assert isinstance(value, jt.Var)
         (
             text_self_attention_masks,
             position_ids,
@@ -249,7 +254,8 @@ class GroundingDINO(nn.Module):
         ) = generate_masks_with_special_tokens_and_transfer_map(
             tokenized, self.specical_tokens, self.tokenizer
         )
-
+        assert isinstance(text_self_attention_masks, jt.Var)
+        assert isinstance(position_ids, jt.Var)
         if text_self_attention_masks.shape[1] > self.max_text_len:
             text_self_attention_masks = text_self_attention_masks[
                 :, : self.max_text_len, : self.max_text_len
@@ -269,14 +275,19 @@ class GroundingDINO(nn.Module):
             tokenized_for_encoder = tokenized
         #这里返回的都是pytorch的tensor
         bert_output = self.bert(**tokenized_for_encoder)  # bs, 195, 768
-        # 转换为jittor的tensor
-        bert_output = {k: jt.array(v.detach().numpy()) for k, v in bert_output.items()}
-
-        encoded_text = self.feat_map(bert_output["last_hidden_state"])  # bs, 195, d_model
+        log_text(f"bert_output type={type(bert_output)}")
+        if hasattr(bert_output, "last_hidden_state"):
+            bert_last_hidden_state = bert_output.last_hidden_state
+        else:
+            bert_last_hidden_state = bert_output[0]
+        log_tensor("bert.last_hidden_state", bert_last_hidden_state)
+        bert_last_hidden_state = jt.array(bert_last_hidden_state.detach().cpu().numpy())
+        assert isinstance(bert_last_hidden_state, jt.Var)
+        encoded_text = self.feat_map(bert_last_hidden_state)  # bs, 195, d_model
         text_token_mask = tokenized['attention_mask'].bool()  # bs, 195
         # text_token_mask: True for nomask, False for mask
         # text_self_attention_masks: True for nomask, False for mask
-
+        log_text(f"text_token_mask type={type(text_token_mask)}")
         if encoded_text.shape[1] > self.max_text_len:
             encoded_text = encoded_text[:, : self.max_text_len, :]
             text_token_mask = text_token_mask[:, : self.max_text_len]
@@ -402,4 +413,3 @@ def build_groundingdino(args):
     )
 
     return model
-

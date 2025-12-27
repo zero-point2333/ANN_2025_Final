@@ -171,10 +171,9 @@ model = load_model(
 print("MODEL LOADED OK", flush=True)
 
 IMAGE_PATH = _resolve_data_path(".asset", "cat_dog.jpeg", "GROUNDINGDINO_IMAGE")
-TEXT_PROMPT = "chair . person . dog ."
-BOX_TRESHOLD = 0.35
-TEXT_TRESHOLD = 0.25
-
+TEXT_PROMPT = os.environ.get("GROUNDINGDINO_TEXT_PROMPT", "chair . person . dog .")
+BOX_TRESHOLD = float(os.environ.get("GROUNDINGDINO_BOX_TH", "0.1"))
+TEXT_TRESHOLD = float(os.environ.get("GROUNDINGDINO_TEXT_TH", "0.1"))
 image_source, image = load_image(IMAGE_PATH)
 print("IMAGE LOADED OK", flush=True)
 print("image type:", type(image), flush=True)

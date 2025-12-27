@@ -4,13 +4,13 @@
 # Copyright (c) 2023 IDEA. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
+import sys
 
 import jittor as jt
 from jittor import nn
 from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
 from transformers import BertModel
-
-
+from groundingdino.util.debug_tools import log_text
 class BertModelWarper(nn.Module):
     def __init__(self, bert_model):
         super().__init__()
@@ -18,6 +18,7 @@ class BertModelWarper(nn.Module):
         assert isinstance(bert_model, BertModel)
 
         # 这里的模块直接引用transformers的BertModel，输入的参数都应该是pytorch的tensor
+        self._bert_model = bert_model
         self.config = bert_model.config
         self.embeddings = bert_model.embeddings
         self.encoder = bert_model.encoder
@@ -26,7 +27,33 @@ class BertModelWarper(nn.Module):
         self.get_extended_attention_mask = bert_model.get_extended_attention_mask
         self.invert_attention_mask = bert_model.invert_attention_mask
         self.get_head_mask = bert_model.get_head_mask
-
+    def load_bert_state_dict(self, state_dict, strict=False):
+        if state_dict is None:
+            return None
+        torch = sys.modules.get("torch")
+        if torch is None:
+            import torch  # transformers is torch-based; keep conversion here
+        converted = {}
+        for k, v in state_dict.items():
+            if torch.is_tensor(v):
+                converted[k] = v.detach().cpu()
+            elif isinstance(v, jt.Var):
+                converted[k] = torch.from_numpy(v.numpy())
+            else:
+                converted[k] = torch.as_tensor(v)
+        load_res = self._bert_model.load_state_dict(converted, strict=strict)
+        try:
+            missing = getattr(load_res, "missing_keys", None)
+            unexpected = getattr(load_res, "unexpected_keys", None)
+            if missing is not None or unexpected is not None:
+                log_text(
+                    f"bert.load_state_dict: keys={len(converted)} "
+                    f"missing={len(missing) if missing is not None else 'n/a'} "
+                    f"unexpected={len(unexpected) if unexpected is not None else 'n/a'}"
+                )
+        except Exception:
+            pass
+        return load_res
     def execute(
         self,
         input_ids=None,
@@ -102,23 +129,33 @@ class BertModelWarper(nn.Module):
             )
         if token_type_ids is None:
             token_type_ids = jt.zeros(input_shape, dtype=jt.int64)
-
+        import torch
+        def _to_torch(x):
+            if x is None:
+                return None
+            if torch.is_tensor(x):
+                return x
+            if isinstance(x, jt.Var):
+                return torch.from_numpy(x.numpy())
+            return torch.as_tensor(x)
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
+        attention_mask_pt = _to_torch(attention_mask)
         extended_attention_mask = self.get_extended_attention_mask(
-            attention_mask, input_shape
+            attention_mask_pt, input_shape
         )
         # Ensure attention mask is float32 to match query dtype
         extended_attention_mask = extended_attention_mask.float()
 
         # If a 2D or 3D attention mask is provided for the cross-attention
         # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
+        encoder_attention_mask_pt = _to_torch(encoder_attention_mask)
         if self.config.is_decoder and encoder_hidden_states is not None:
             encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.shape
             encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
-            if encoder_attention_mask is None:
-                encoder_attention_mask = jt.ones(encoder_hidden_shape)
-            encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)
+            if encoder_attention_mask_pt is None:
+                encoder_attention_mask_pt = torch.ones(encoder_hidden_shape)
+            encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask_pt)
         else:
             encoder_extended_attention_mask = None
         # if os.environ.get('IPDB_SHILONG_DEBUG', None) == 'INFO':
@@ -129,17 +166,16 @@ class BertModelWarper(nn.Module):
         # attention_probs has shape bsz x n_heads x N x N
         # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
         # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
-        head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
-
+        head_mask_pt = _to_torch(head_mask)
+        head_mask = self.get_head_mask(head_mask_pt, self.config.num_hidden_layers)
         # Convert Jittor inputs to PyTorch tensors for BERT embeddings
-        import torch
-        input_ids_pt = torch.from_numpy(input_ids.numpy()).long() if input_ids is not None else None
-        position_ids_pt = torch.from_numpy(position_ids.numpy()).long() if position_ids is not None else None
-        token_type_ids_pt = torch.from_numpy(token_type_ids.numpy()).long() if token_type_ids is not None else None
+        log_text(f"bert.execute input_ids type={type(input_ids)} attention_mask type={type(attention_mask)}")
+        input_ids_pt = _to_torch(input_ids).long() if input_ids is not None else None
+        position_ids_pt = _to_torch(position_ids).long() if position_ids is not None else None
+        token_type_ids_pt = _to_torch(token_type_ids).long() if token_type_ids is not None else None
         if token_type_ids_pt is not None:
             token_type_ids_pt.clamp_(0, max(0, self.config.type_vocab_size - 1))
-        inputs_embeds_pt = torch.from_numpy(inputs_embeds.numpy()) if inputs_embeds is not None else None
-
+        inputs_embeds_pt = _to_torch(inputs_embeds) if inputs_embeds is not None else None
         embedding_output = self.embeddings(
             input_ids=input_ids_pt,
             position_ids=position_ids_pt,
@@ -152,11 +188,10 @@ class BertModelWarper(nn.Module):
         # embedding_output = jt.array(embedding_output.detach().numpy())
 
         # Convert attention_mask to PyTorch tensor for encoder
-        extended_attention_mask_pt = torch.from_numpy(extended_attention_mask.numpy()) if extended_attention_mask is not None else None
+        extended_attention_mask_pt = extended_attention_mask
         head_mask_pt = head_mask  # head_mask is already a list from PyTorch method
-        encoder_hidden_states_pt = torch.from_numpy(encoder_hidden_states.numpy()) if encoder_hidden_states is not None else None
-        encoder_extended_attention_mask_pt = torch.from_numpy(encoder_extended_attention_mask.numpy()) if encoder_extended_attention_mask is not None else None
-
+        encoder_hidden_states_pt = _to_torch(encoder_hidden_states) if encoder_hidden_states is not None else None
+        encoder_extended_attention_mask_pt = encoder_extended_attention_mask
         encoder_outputs = self.encoder(
             embedding_output,
             attention_mask=extended_attention_mask_pt,

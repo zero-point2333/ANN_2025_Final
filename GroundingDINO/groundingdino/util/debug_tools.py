@@ -14,7 +14,11 @@ def _as_numpy(x: Any) -> np.ndarray:
     if jt is not None and isinstance(x, getattr(jt, "Var", ())):
         arr = x.numpy()
     else:
-        arr = np.asarray(x)
+        torch = sys.modules.get("torch", None)
+        if torch is not None and isinstance(x, getattr(torch, "Tensor", ())):
+            arr = x.detach().cpu().numpy()
+        else:
+            arr = np.asarray(x)
     if arr.dtype.kind not in ("f", "c"):
         arr = arr.astype(np.float32, copy=False)
     if not arr.flags["C_CONTIGUOUS"]:

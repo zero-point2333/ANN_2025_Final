@@ -226,6 +226,10 @@ class Transformer(nn.Module):
             assert isinstance(pos_embed__, jt.Var)
         assert not refpoint_embed or isinstance(refpoint_embed, jt.Var)
         assert not tgt or isinstance(tgt, jt.Var)
+        assert isinstance(text_dict, dict)
+        for key in ("encoded_text", "text_token_mask", "position_ids", "text_self_attention_masks"):
+            log_text(f"text_dict[{key}] type={type(text_dict.get(key))}")
+            assert isinstance(text_dict.get(key), jt.Var)
         log_text(
             f"Transformer.execute: levels={len(srcs)} two_stage={self.two_stage_type} num_queries={self.num_queries}",
         )
