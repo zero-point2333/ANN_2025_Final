@@ -157,7 +157,7 @@ class MultiScaleDeformableAttention(nn.Module):
         )
         grid_init = jt.stack([thetas.cos(), thetas.sin()], dim=-1)
         grid_init = (
-            (grid_init / grid_init.abs().max(-1, keepdim=True)[0])
+            (grid_init / grid_init.abs().max(dim=-1, keepdims=True)[0])
             .view(self.num_heads, 1, 1, 2)
             .repeat(1, self.num_levels, self.num_points, 1)
         )

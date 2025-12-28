@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, DistributedSampler
+import jittor as jt
 
 from groundingdino.models import build_model
 import groundingdino.datasets.transforms as T
@@ -26,7 +27,7 @@ def load_model(model_config_path: str, model_checkpoint_path: str, device: str =
     args.device = device
     model = build_model(args)
     checkpoint = torch.load(model_checkpoint_path, map_location="cpu")
-    model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
+    model.load_state_dict(clean_state_dict(checkpoint["model"]))
     model.eval()
     return model
 
@@ -43,10 +44,10 @@ class CocoDetection(torchvision.datasets.CocoDetection):
 
         w, h = img.size
         boxes = [obj["bbox"] for obj in target]
-        boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
+        boxes = jt.array(boxes, dtype=jt.float32).reshape(-1, 4)
         boxes[:, 2:] += boxes[:, :2]  # xywh -> xyxy
-        boxes[:, 0::2].clamp_(min=0, max=w)
-        boxes[:, 1::2].clamp_(min=0, max=h)
+        boxes[:, 0::2].clamp_(min_v=0, max_v=w)
+        boxes[:, 1::2].clamp_(min_v=0, max_v=h)
         # filt invalid boxes/masks/keypoints
         keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
         boxes = boxes[keep]
@@ -55,7 +56,7 @@ class CocoDetection(torchvision.datasets.CocoDetection):
         image_id = self.ids[idx]
         target_new["image_id"] = image_id
         target_new["boxes"] = boxes
-        target_new["orig_size"] = torch.as_tensor([int(h), int(w)])
+        target_new["orig_size"] = jt.array([int(h), int(w)])
 
         if self._transforms is not None:
             img, target = self._transforms(img, target_new)
@@ -84,7 +85,7 @@ class PostProcessCocoGrounding(nn.Module):
         # build a mapping from label_id to pos_map
         new_pos_map = torch.zeros((91, 256))
         for k, v in id_map.items():
-            new_pos_map[v] = positive_map[k]
+            new_pos_map[v] = torch.from_numpy(positive_map[k].numpy())
         self.positive_map = new_pos_map
 
     @torch.no_grad()
@@ -143,7 +144,6 @@ def main(args):
 
     # build model
     model = load_model(args.config_file, args.checkpoint_path)
-    model = model.to(args.device)
     model = model.eval()
 
     # build dataloader
@@ -176,7 +176,9 @@ def main(args):
 
     # run inference
     start = time.time()
+    print("Dataset length:", len(dataset))
     for i, (images, targets) in enumerate(data_loader):
+        print("inferring image")
         # get images and captions
         images = images.tensors.to(args.device)
         bs = images.shape[0]
@@ -191,12 +193,15 @@ def main(args):
         cocogrounding_res = {
             target["image_id"]: output for target, output in zip(targets, results)}
         evaluator.update(cocogrounding_res)
+        print(f"inferred {i}-th image")
 
         if (i+1) % 30 == 0:
             used_time = time.time() - start
             eta = len(data_loader) / (i+1e-5) * used_time - used_time
             print(
                 f"processed {i}/{len(data_loader)} images. time: {used_time:.2f}s, ETA: {eta:.2f}s")
+    
+    print("all images processed")
 
     evaluator.synchronize_between_processes()
     evaluator.accumulate()

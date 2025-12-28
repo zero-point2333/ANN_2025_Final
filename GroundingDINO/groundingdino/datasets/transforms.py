@@ -27,8 +27,8 @@ def crop(image, target, region):
         max_size = jt.array([w, h], dtype=jt.float32)
         cropped_boxes = boxes - jt.array([j, i, j, i])
         cropped_boxes = jt.minimum(cropped_boxes.reshape(-1, 2, 2), max_size)
-        cropped_boxes = cropped_boxes.maximum(0)
-        area = (cropped_boxes[:, 1, :] - cropped_boxes[:, 0, :]).prod(dim=1)
+        cropped_boxes = jt.clamp(cropped_boxes, min_v=0)
+        area = jt.array(cropped_boxes[:, 1, :] - cropped_boxes[:, 0, :]).prod(dim=1)
         target["boxes"] = cropped_boxes.reshape(-1, 4)
         target["area"] = area
         fields.append("boxes")
@@ -37,17 +37,14 @@ def crop(image, target, region):
         masks = target["masks"]
         target["masks"] = masks[:, i:i + h, j:j + w]
         fields.append("masks")
-
     if "boxes" in target or "masks" in target:
         if "boxes" in target:
             cropped_boxes = target["boxes"].reshape(-1, 2, 2)
             keep = jt.all(cropped_boxes[:, 1, :] > cropped_boxes[:, 0, :], dim=1)
         else:
             masks = target["masks"]
-            if isinstance(masks, jt.Var):
-                keep = masks.reshape(masks.shape[0], -1).any(1)
-            else:
-                keep = masks.reshape(masks.shape[0], -1).any(1)
+            assert isinstance(masks, jt.Var)
+            keep = masks.reshape(masks.shape[0], -1).any(1)
 
         for field in fields:
             if field in target:
@@ -65,7 +62,7 @@ def crop(image, target, region):
 
 
 def hflip(image, target):
-    flipped_image = image.transpose(PIL.Image.FLIP_LEFT_RIGHT)
+    flipped_image = T.hflip(image)
 
     w, h = image.size
 

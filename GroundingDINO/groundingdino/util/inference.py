@@ -471,8 +471,8 @@ def predict(
     if debug_mode:
         log_tensor("predict.pred_logits_np", logits_np, force=True)
         log_tensor("predict.pred_boxes_np", boxes_np, force=True)
-    prediction_logits = logits_np
-    prediction_boxes = boxes_np
+    prediction_logits: np.ndarray = logits_np
+    prediction_boxes: np.ndarray = boxes_np
 
     # --- Guard: num_queries==0 ---
     if len(prediction_logits.shape) == 0 or prediction_logits.shape[0] == 0:

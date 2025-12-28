@@ -146,7 +146,7 @@ def masks_to_boxes(masks: jt.Var):
 
     y_mask = masks * y.unsqueeze(dim = 0)
     y_max = y_mask.flatten(start_dim=1).max(dim=-1)
-    y_min = y_mask.masked_fill(~(masks.astype(jt.bool)), 1e8).flatten(1).min(dim=-1)
+    y_min = jt.masked_fill(y_mask, jt.logical_not(masks.astype(jt.bool)), 1e8).flatten(1).min(dim=-1)
     return jt.stack([x_min, y_min, x_max, y_max], dim=1)
 
 
@@ -154,6 +154,6 @@ if __name__ == "__main__":
     x = jt.rand(5, 4)
     y = jt.rand(3, 4)
     iou, union = box_iou(x, y)
-    import ipdb
+    # import ipdb
 
-    ipdb.set_trace()
+    # ipdb.set_trace()

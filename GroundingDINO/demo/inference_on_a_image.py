@@ -77,7 +77,7 @@ def plot_boxes_to_image(image_pil, tgt):
         draw.rectangle(bbox, fill=color)
         draw.text((x0, y0), str(label), fill="white")
         
-        # log_text(f"Drawing on [{x0}, {y0}, {x1}, {y1}]")
+        log_text(f"Drawing on [{x0}, {y0}, {x1}, {y1}]")
         mask_draw.rectangle([x0, y0, x1, y1], fill=255, width=6)
 
     return image_pil, mask
@@ -229,11 +229,12 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
             token_span=token_spans
         ) # n_phrase, 256
 
-        logits_for_phrases = jt.nn.matmul_transpose(positive_maps, logits) # n_phrase, nq
+        logits_for_phrases: jt.Var = jt.nn.matmul_transpose(positive_maps, logits) # n_phrase, nq
         all_logits = []
         all_phrases = []
         all_boxes = []
         for (token_span, logit_phr) in zip(token_spans, logits_for_phrases):
+            assert isinstance(logit_phr, jt.Var)
             # get phrase
             phrase = ' '.join([caption[_s:_e] for (_s, _e) in token_span])
             # get mask

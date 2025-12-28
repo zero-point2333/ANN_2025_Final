@@ -322,6 +322,7 @@ def get_raw_dict(args):
 
 def stat_tensors(tensor):
     assert len(tensor.shape) == 1
+    assert isinstance(tensor, jt.Var)
     tensor_sm = nn.softmax(tensor, dim=0)
     entropy = (tensor_sm * jt.log(tensor_sm + 1e-9)).sum()
 

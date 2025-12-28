@@ -327,7 +327,8 @@ class Transformer(nn.Module):
                 enc_outputs_class_unselected = self.enc_out_class_embed(output_memory, text_dict)
             else:
                 enc_outputs_class_unselected = self.enc_out_class_embed(output_memory)
-            topk_logits = enc_outputs_class_unselected.max(-1)[0]
+            assert isinstance(enc_outputs_class_unselected, jt.Var)
+            topk_logits = enc_outputs_class_unselected.max(dim=-1)[0]
             enc_outputs_coord_unselected = (
                 self.enc_out_bbox_embed(output_memory) + output_proposals
             )  # (bs, \sum{hw}, 4) unsigmoid
