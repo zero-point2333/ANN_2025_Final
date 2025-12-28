@@ -266,8 +266,8 @@ class ContrastiveEmbed(nn.Module):
         if not hasattr(self, "_debug_shape_logged"):
             print("Contrastive mask/res shapes:", mask.shape, res.shape, flush=True)
             self._debug_shape_logged = True
-        res = res.masked_fill(mask, float("-inf"))
-
+        mask_f = mask.astype(res.dtype)
+        res = res + mask_f * (-1e9)
         # padding to max_text_len
         new_res = jt.full((*res.shape[:-1], self.max_text_len), float("-inf"), dtype=res.dtype)
         new_res[..., : res.shape[-1]] = res

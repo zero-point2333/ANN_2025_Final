@@ -1,37 +1,15 @@
 import argparse
-import os
-import sys
 import time
-
-import numpy as np
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, DistributedSampler
 import jittor as jt
-
-from groundingdino.models import build_model
+import jittor.nn as nn
+import torchvision
 import groundingdino.datasets.transforms as T
 from groundingdino.util import box_ops, get_tokenlizer
-from groundingdino.util.misc import clean_state_dict, collate_fn
+from groundingdino.util.inference import _load_checkpoint_any, load_model
+from groundingdino.util.misc import collate_fn
 from groundingdino.util.slconfig import SLConfig
-
-# from torchvision.datasets import CocoDetection
-import torchvision
-
 from groundingdino.util.vl_utils import build_captions_and_token_span, create_positive_map_from_span
 from groundingdino.datasets.cocogrounding_eval import CocoGroundingEvaluator
-
-
-def load_model(model_config_path: str, model_checkpoint_path: str, device: str = "cuda"):
-    args = SLConfig.fromfile(model_config_path)
-    args.device = device
-    model = build_model(args)
-    checkpoint = torch.load(model_checkpoint_path, map_location="cpu")
-    model.load_state_dict(clean_state_dict(checkpoint["model"]))
-    model.eval()
-    return model
-
-
 class CocoDetection(torchvision.datasets.CocoDetection):
     def __init__(self, img_folder, ann_file, transforms):
         super().__init__(img_folder, ann_file)
@@ -83,13 +61,11 @@ class PostProcessCocoGrounding(nn.Module):
                   41: 47, 42: 48, 43: 49, 44: 50, 45: 51, 46: 52, 47: 53, 48: 54, 49: 55, 50: 56, 51: 57, 52: 58, 53: 59, 54: 60, 55: 61, 56: 62, 57: 63, 58: 64, 59: 65, 60: 67, 61: 70, 62: 72, 63: 73, 64: 74, 65: 75, 66: 76, 67: 77, 68: 78, 69: 79, 70: 80, 71: 81, 72: 82, 73: 84, 74: 85, 75: 86, 76: 87, 77: 88, 78: 89, 79: 90}
 
         # build a mapping from label_id to pos_map
-        new_pos_map = torch.zeros((91, 256))
+        new_pos_map = jt.zeros((91, 256), dtype=jt.float32)
         for k, v in id_map.items():
-            new_pos_map[v] = torch.from_numpy(positive_map[k].numpy())
+            new_pos_map[v] = positive_map[k]
         self.positive_map = new_pos_map
-
-    @torch.no_grad()
-    def forward(self, outputs, target_sizes, not_to_xyxy=False):
+    def execute(self, outputs, target_sizes, not_to_xyxy=False):
         """ Perform the computation
         Parameters:
             outputs: raw outputs of the model
@@ -102,19 +78,17 @@ class PostProcessCocoGrounding(nn.Module):
 
         # pos map to logit
         prob_to_token = out_logits.sigmoid()  # bs, 100, 256
-        pos_maps = self.positive_map.to(prob_to_token.device)
+        pos_maps = self.positive_map
         # (bs, 100, 256) @ (91, 256).T -> (bs, 100, 91)
-        prob_to_label = prob_to_token @ pos_maps.T
-
+        prob_to_label = prob_to_token @ pos_maps.transpose(0, 1)
         # if os.environ.get('IPDB_SHILONG_DEBUG', None) == 'INFO':
         #     import ipdb; ipdb.set_trace()
-
-        assert len(out_logits) == len(target_sizes)
+        assert out_logits.shape[0] == target_sizes.shape[0]
         assert target_sizes.shape[1] == 2
 
         prob = prob_to_label
-        topk_values, topk_indexes = torch.topk(
-            prob.view(out_logits.shape[0], -1), num_select, dim=1)
+        topk_values, topk_indexes = jt.topk(
+            prob.reshape(out_logits.shape[0], -1), num_select, dim=1)
         scores = topk_values
         topk_boxes = topk_indexes // prob.shape[2]
         labels = topk_indexes % prob.shape[2]
@@ -123,29 +97,66 @@ class PostProcessCocoGrounding(nn.Module):
             boxes = out_bbox
         else:
             boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
-
-        boxes = torch.gather(
+        boxes = jt.gather(
             boxes, 1, topk_boxes.unsqueeze(-1).repeat(1, 1, 4))
 
         # and from relative [0, 1] to absolute [0, height] coordinates
         img_h, img_w = target_sizes.unbind(1)
-        scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
+        scale_fct = jt.stack([img_w, img_h, img_w, img_h], dim=1)
         boxes = boxes * scale_fct[:, None, :]
-
-        results = [{'scores': s, 'labels': l, 'boxes': b}
-                   for s, l, b in zip(scores, labels, boxes)]
-
+        results = []
+        for idx in range(scores.shape[0]):
+            results.append(
+                {'scores': scores[idx], 'labels': labels[idx], 'boxes': boxes[idx]}
+            )
         return results
 
 
+def _iter_batches(dataset, batch_size=1):
+    total = len(dataset)
+    for start in range(0, total, batch_size):
+        batch = [dataset[i] for i in range(start, min(start + batch_size, total))]
+        yield collate_fn(batch)
+def _load_bert_from_checkpoint(model, checkpoint_path: str) -> None:
+    ckpt = _load_checkpoint_any(checkpoint_path)
+    if isinstance(ckpt, dict):
+        sd = ckpt.get("model", ckpt.get("state_dict", ckpt))
+    else:
+        sd = ckpt
+    if not isinstance(sd, dict):
+        return
+    bert_sd = {}
+    for k, v in sd.items():
+        k_norm = k
+        if k_norm.startswith("module."):
+            k_norm = k_norm[len("module."):]
+        if k_norm.startswith("bert."):
+            bert_sd[k_norm[len("bert."):]] = v
+    if not bert_sd:
+        print("bert load skipped: no bert.* keys in checkpoint", flush=True)
+        return
+    bert = getattr(model, "bert", None)
+    if bert is not None and hasattr(bert, "load_bert_state_dict"):
+        try:
+            load_res = bert.load_bert_state_dict(bert_sd, strict=False)
+            missing = getattr(load_res, "missing_keys", None)
+            unexpected = getattr(load_res, "unexpected_keys", None)
+            missing_n = len(missing) if missing is not None else 0
+            unexpected_n = len(unexpected) if unexpected is not None else 0
+            print(
+                f"bert load: keys={len(bert_sd)} missing={missing_n} unexpected={unexpected_n}",
+                flush=True,
+            )
+        except Exception:
+            pass
 def main(args):
     # config
     cfg = SLConfig.fromfile(args.config_file)
 
     # build model
-    model = load_model(args.config_file, args.checkpoint_path)
-    model = model.eval()
-
+    model = load_model(args.config_file, args.checkpoint_path, device=args.device)
+    _load_bert_from_checkpoint(model, args.checkpoint_path)
+    model.eval()
     # build dataloader
     transform = T.Compose(
         [
@@ -156,14 +167,10 @@ def main(args):
     )
     dataset = CocoDetection(
         args.image_dir, args.anno_path, transforms=transform)
-    data_loader = DataLoader(
-        dataset, batch_size=1, shuffle=False, num_workers=args.num_workers, collate_fn=collate_fn)
-
     # build post processor
     tokenlizer = get_tokenlizer.get_tokenlizer(cfg.text_encoder_type)
     postprocessor = PostProcessCocoGrounding(
-        coco_api=dataset.coco, tokenlizer=tokenlizer)
-
+        num_select=args.num_select, coco_api=dataset.coco, tokenlizer=tokenlizer)
     # build evaluator
     evaluator = CocoGroundingEvaluator(
         dataset.coco, iou_types=("bbox",), useCats=True)
@@ -176,20 +183,21 @@ def main(args):
 
     # run inference
     start = time.time()
-    print("Dataset length:", len(dataset))
-    for i, (images, targets) in enumerate(data_loader):
+    total = len(dataset)
+    print("Dataset length:", total)
+    for i, (images, targets) in enumerate(_iter_batches(dataset, batch_size=1)):
         print("inferring image")
         # get images and captions
-        images = images.tensors.to(args.device)
-        bs = images.shape[0]
+        bs = images.tensors.shape[0]
         input_captions = [caption] * bs
 
         # feed to the model
-        outputs = model(images, captions=input_captions)
-
-        orig_target_sizes = torch.stack(
-            [t["orig_size"] for t in targets], dim=0).to(images.device)
-        results = postprocessor(outputs, orig_target_sizes)
+        with jt.no_grad():
+            model.unset_image_tensor()
+            outputs = model(images, captions=input_captions)
+            orig_target_sizes = jt.stack(
+                [t["orig_size"] for t in targets], dim=0)
+            results = postprocessor(outputs, orig_target_sizes)
         cocogrounding_res = {
             target["image_id"]: output for target, output in zip(targets, results)}
         evaluator.update(cocogrounding_res)
@@ -197,10 +205,9 @@ def main(args):
 
         if (i+1) % 30 == 0:
             used_time = time.time() - start
-            eta = len(data_loader) / (i+1e-5) * used_time - used_time
+            eta = total / (i+1e-5) * used_time - used_time
             print(
-                f"processed {i}/{len(data_loader)} images. time: {used_time:.2f}s, ETA: {eta:.2f}s")
-    
+                f"processed {i}/{total} images. time: {used_time:.2f}s, ETA: {eta:.2f}s")
     print("all images processed")
 
     evaluator.synchronize_between_processes()
