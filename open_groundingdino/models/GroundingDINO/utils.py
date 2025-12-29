@@ -1,0 +1,275 @@
+# ------------------------------------------------------------------------
+# Grounding DINO
+# url: https://github.com/IDEA-Research/GroundingDINO
+# Copyright (c) 2023 IDEA. All Rights Reserved.
+# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
+# ------------------------------------------------------------------------
+
+import copy
+import math
+import numpy as np
+
+import jittor as jt
+import jittor.nn as nn
+from jittor import Var
+
+
+def _get_clones(module, N, layer_share=False):
+    if layer_share:
+        return nn.ModuleList([module for i in range(N)])
+    else: # to use deep copy, need to modify jittor.attention.MultiheadAttention.__setstate__()
+        return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
+
+
+def get_sine_pos_embed(
+    pos_tensor: jt.Var,
+    num_pos_feats: int = 128,
+    temperature: int = 10000,
+    exchange_xy: bool = True,
+):
+    """generate sine position embedding from a position tensor
+    Args:
+        pos_tensor (jt.Var): shape: [..., n].
+        num_pos_feats (int): projected shape for each float in the tensor.
+        temperature (int): temperature in the sine/cosine function.
+        exchange_xy (bool, optional): exchange pos x and pos y. \
+            For example, input tensor is [x,y], the results will be [pos(y), pos(x)]. Defaults to True.
+    Returns:
+        pos_embed (jt.Var): shape: [..., n*num_pos_feats].
+    """
+    scale = 2 * math.pi
+    dim_t: jt.Var = jt.arange(num_pos_feats, dtype=jt.float32)
+    dim_t = temperature ** (2 * (dim_t // 2) / num_pos_feats)
+
+    def sine_func(x: jt.Var) -> jt.Var:
+        sin_x = x * scale / dim_t
+        sin_x = jt.stack((sin_x[..., 0::2].sin(), sin_x[..., 1::2].cos()), dim=3).flatten(2)
+        return sin_x
+
+    pos_res = [sine_func(x) for x in pos_tensor.split([1] * pos_tensor.shape[-1], dim=-1)]
+    if exchange_xy:
+        pos_res[0], pos_res[1] = pos_res[1], pos_res[0]
+    pos_res = jt.concat(pos_res, dim=-1)
+    return pos_res
+
+
+def gen_encoder_output_proposals(
+    memory: Var, memory_padding_mask: Var, spatial_shapes: Var, learnedwh=None
+):
+    """
+    Input:
+        - memory: bs, \sum{hw}, d_model
+        - memory_padding_mask: bs, \sum{hw}
+        - spatial_shapes: nlevel, 2
+        - learnedwh: 2
+    Output:
+        - output_memory: bs, \sum{hw}, d_model
+        - output_proposals: bs, \sum{hw}, 4
+    """
+    N_, S_, C_ = memory.shape
+    proposals = []
+    _cur = 0
+    spatial_shapes_np = np.array(spatial_shapes)
+    for lvl, (H_, W_) in enumerate(spatial_shapes_np):
+        H_int, W_int = int(H_), int(W_)
+        mask_flatten_ = memory_padding_mask[:, _cur : (_cur + H_int * W_int)].view(N_, H_int, W_int, 1)
+        inv_mask = jt.logical_not(mask_flatten_)
+        valid_H = jt.sum(inv_mask[:, :, 0, 0], 1)
+        valid_W = jt.sum(inv_mask[:, 0, :, 0], 1)
+
+        grid_y, grid_x = jt.meshgrid(
+            jt.linspace(0, H_int - 1, H_int).float32(),
+            jt.linspace(0, W_int - 1, W_int).float32(),
+        )
+        grid = jt.concat([grid_x.unsqueeze(-1), grid_y.unsqueeze(-1)], -1)  # H_, W_, 2
+
+        scale = jt.concat([valid_W.unsqueeze(-1), valid_H.unsqueeze(-1)], 1).view(N_, 1, 1, 2)
+        grid = (grid.unsqueeze(0).expand(N_, -1, -1, -1) + 0.5) / scale
+
+        if learnedwh is not None:
+            wh = jt.ones_like(grid) * learnedwh.sigmoid() * (2.0**lvl)
+        else:
+            wh = jt.ones_like(grid) * 0.05 * (2.0**lvl)
+
+        proposal = jt.concat((grid, wh), -1).view(N_, -1, 4)
+        proposals.append(proposal)
+        _cur += H_int * W_int
+
+    output_proposals = jt.concat(proposals, 1)
+    output_proposals_valid = (output_proposals > 0.01) & (output_proposals < 0.99)
+    output_proposals_valid = output_proposals_valid.float32().prod(dim=-1).unsqueeze(-1).bool()
+    output_proposals = jt.log(output_proposals / (1 - output_proposals))  # unsigmoid
+    output_proposals = output_proposals.masked_fill(memory_padding_mask.unsqueeze(-1), float("inf"))
+    output_proposals = output_proposals.masked_fill(jt.logical_not(output_proposals_valid), float("inf"))
+
+    output_memory = memory
+    output_memory = output_memory.masked_fill(memory_padding_mask.unsqueeze(-1), float(0))
+    output_memory = output_memory.masked_fill(jt.logical_not(output_proposals_valid), float(0))
+
+    return output_memory, output_proposals
+
+
+class RandomBoxPerturber:
+    def __init__(
+        self, x_noise_scale=0.2, y_noise_scale=0.2, w_noise_scale=0.2, h_noise_scale=0.2
+    ) -> None:
+        self.noise_scale = jt.array([x_noise_scale, y_noise_scale, w_noise_scale, h_noise_scale])
+
+    def __call__(self, refanchors: Var) -> Var:
+        nq, bs, query_dim = refanchors.shape
+
+        noise_raw = jt.rand(refanchors.shape)
+        noise_scale = self.noise_scale[:query_dim]
+
+        new_refanchors = refanchors * (1 + (noise_raw - 0.5) * noise_scale)
+        return new_refanchors.clamp(0, 1)
+
+
+def sigmoid_focal_loss(
+    inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2, no_reduction=False
+):
+    """
+    Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
+    Args:
+        inputs: A float tensor of arbitrary shape.
+                The predictions for each example.
+        targets: A float tensor with the same shape as inputs. Stores the binary
+                 classification label for each element in inputs
+                (0 for the negative class and 1 for the positive class).
+        alpha: (optional) Weighting factor in range (0,1) to balance
+                positive vs negative examples. Default = -1 (no weighting).
+        gamma: Exponent of the modulating factor (1 - p_t) to
+               balance easy vs hard examples.
+    Returns:
+        Loss tensor
+    """
+    prob = inputs.sigmoid()
+    ce_loss = nn.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+    p_t = prob * targets + (1 - prob) * (1 - targets)
+    loss = ce_loss * ((1 - p_t) ** gamma)
+
+    if alpha >= 0:
+        alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+        loss = alpha_t * loss
+
+    if no_reduction:
+        return loss
+
+    return loss.mean(1).sum() / num_boxes
+
+
+class MLP(nn.Module):
+    """Very simple multi-layer perceptron (also called FFN)"""
+
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
+        super().__init__()
+        self.num_layers = num_layers
+        h = [hidden_dim] * (num_layers - 1)
+        self.layers = nn.ModuleList([
+            nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim])
+        ])
+
+    def execute(self, x) -> jt.Var:
+        assert isinstance(x, jt.Var)
+        for i, layer in enumerate(self.layers):
+            x = nn.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
+        assert isinstance(x, jt.Var)
+        return x
+
+
+def _get_activation_fn(activation, d_model=256, batch_dim=0):
+    """Return an activation function given a string"""
+    if activation == "relu":
+        return nn.relu
+    if activation == "gelu":
+        return nn.gelu
+    if activation == "leaky_relu":
+        return nn.leaky_relu
+    if activation == "prelu":
+        return nn.PReLU()
+    if activation == "relu6":
+        return nn.relu6
+    if activation == "elu":
+        return nn.elu
+    if activation == "silu":
+        return nn.silu
+
+    raise RuntimeError(f"activation should be relu/gelu, not {activation}.")
+
+
+def gen_sineembed_for_position(pos_tensor: jt.Var) -> jt.Var:
+    assert isinstance(pos_tensor, jt.Var)
+    scale = 2 * math.pi
+    dim_t = jt.arange(128, dtype=jt.float32)
+    dim_t = 10000 ** (2 * (dim_t // 2) / 128)
+    x_embed = pos_tensor[:, :, 0] * scale
+    y_embed = pos_tensor[:, :, 1] * scale
+    pos_x = x_embed[:, :, None] / dim_t
+    pos_y = y_embed[:, :, None] / dim_t
+    pos_x = jt.stack((pos_x[:, :, 0::2].sin(), pos_x[:, :, 1::2].cos()), dim=3).flatten(2)
+    pos_y = jt.stack((pos_y[:, :, 0::2].sin(), pos_y[:, :, 1::2].cos()), dim=3).flatten(2)
+    if pos_tensor.shape[-1] == 2:
+        pos = jt.concat((pos_y, pos_x), dim=2)
+    elif pos_tensor.shape[-1] == 4:
+        w_embed = pos_tensor[:, :, 2] * scale
+        pos_w = w_embed[:, :, None] / dim_t
+        pos_w = jt.stack((pos_w[:, :, 0::2].sin(), pos_w[:, :, 1::2].cos()), dim=3).flatten(2)
+
+        h_embed = pos_tensor[:, :, 3] * scale
+        pos_h = h_embed[:, :, None] / dim_t
+        pos_h = jt.stack((pos_h[:, :, 0::2].sin(), pos_h[:, :, 1::2].cos()), dim=3).flatten(2)
+
+        pos = jt.concat((pos_y, pos_x, pos_w, pos_h), dim=2)
+    else:
+        raise ValueError("Unknown pos_tensor shape(-1):{}".format(pos_tensor.shape[-1]))
+    return pos
+
+
+class ContrastiveEmbed(nn.Module):
+    def __init__(self, max_text_len=256):
+        """
+        Args:
+            max_text_len: max length of text.
+        """
+        super().__init__()
+        self.max_text_len = max_text_len
+
+    def execute(self, x, text_dict):
+        """_summary_
+
+        Args:
+            x (_type_): _description_
+            text_dict (_type_): _description_
+            {
+                'encoded_text': encoded_text, # bs, 195, d_model
+                'text_token_mask': text_token_mask, # bs, 195
+                        # True for used tokens. False for padding tokens
+            }
+        Returns:
+            _type_: _description_
+        """
+        assert isinstance(text_dict, dict)
+
+        y = text_dict["encoded_text"]
+        text_token_mask = text_dict["text_token_mask"]
+
+        res = x @ y.transpose(-1, -2)
+        text_len = res.shape[-1]
+        mask_base = jt.logical_not(text_token_mask)[..., :text_len]
+        if mask_base.shape[-1] < text_len:
+            pad = jt.zeros((mask_base.shape[0], text_len - mask_base.shape[-1]), dtype=mask_base.dtype)
+            mask_base = jt.concat([mask_base, pad], -1)
+        repeat_len = int(res.shape[1])
+        mask_np = np.repeat(mask_base.numpy()[:, None, :], repeat_len, axis=1)
+        mask = jt.array(mask_np)
+        # debug once
+        if not hasattr(self, "_debug_shape_logged"):
+            print("Contrastive mask/res shapes:", mask.shape, res.shape, flush=True)
+            self._debug_shape_logged = True
+        mask_f = mask.astype(res.dtype)
+        res = res + mask_f * (-1e9)
+        # padding to max_text_len
+        new_res = jt.full((*res.shape[:-1], self.max_text_len), float("-inf"), dtype=res.dtype)
+        new_res[..., : res.shape[-1]] = res
+
+        return new_res
