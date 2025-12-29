@@ -10,7 +10,7 @@ import os
 import contextlib
 import copy
 import numpy as np
-import torch
+import jittor as jt
 
 from pycocotools.cocoeval import COCOeval
 from pycocotools.coco import COCO
@@ -177,7 +177,7 @@ class CocoEvaluator(object):
 
 def convert_to_xywh(boxes):
     xmin, ymin, xmax, ymax = boxes.unbind(1)
-    return torch.stack((xmin, ymin, xmax - xmin, ymax - ymin), dim=1)
+    return jt.stack((xmin, ymin, xmax - xmin, ymax - ymin), dim=1)
 
 
 def merge(img_ids, eval_imgs):

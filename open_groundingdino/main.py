@@ -9,20 +9,26 @@ from pathlib import Path
 import os, sys
 import numpy as np
 import jittor as jt
+from jittor import nn
 from jittor.dataset import DataLoader
 from jittor.dataset import  SequentialSampler, RandomSampler, BatchSampler
 
 from util.get_param_dicts import get_param_dict
 from util.logger import setup_logger
 from util.slconfig import DictAction, SLConfig
-from util.utils import BestMetricHolder
+from util.utils import BestMetricHolder, clean_state_dict
 import util.misc as utils
 
 import datasets
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
+from datasets.data_util import remove
+from datasets.concat_dataset import ConcatDataset
 
-from util.utils import clean_state_dict
+from models.registry import MODULE_BUILD_FUNCS
+import urllib.request
+import tempfile
+from collections import OrderedDict
 
 
 def get_args_parser():
@@ -67,15 +73,14 @@ def get_args_parser():
     parser.add_argument('--rank', default=0, type=int,
                         help='number of distributed processes')
     parser.add_argument("--local_rank", type=int, help='local rank for DistributedDataParallel')
-    parser.add_argument("--local-rank", type=int, help='local rank for DistributedDataParallel')
     parser.add_argument('--amp', action='store_true',
                         help="Train with mixed precision")
+    parser.add_argument("--use_coco_eval", default=False, type=bool, help="use coco evaluation")
     return parser
 
 
 def build_model_main(args):
     # we use register to maintain models from catdet6 on.
-    from models.registry import MODULE_BUILD_FUNCS
     assert args.modelname in MODULE_BUILD_FUNCS._module_dict
 
     build_func = MODULE_BUILD_FUNCS.get(args.modelname)
@@ -85,7 +90,7 @@ def build_model_main(args):
 
 def main(args):
     
-    utils.setup_distributed(args)
+    # utils.setup_distributed(args)
     # load cfg file and update the args
     print("Loading config file from {}".format(args.config_file))
     time.sleep(args.rank * 0.02)
@@ -132,7 +137,6 @@ def main(args):
     logger.info('local_rank: {}'.format(args.local_rank))
     logger.info("args: " + str(args) + '\n')
 
-    device = jt.device(args.device)
     # fix the seed for reproducibility
     seed = args.seed + utils.get_rank()
     jt.set_global_seed(seed)
@@ -147,8 +151,6 @@ def main(args):
 
     model_without_ddp = model
     if args.distributed:
-        # Jittor的分布式处理
-        from jittor import nn
         # 使用Jittor的数据并行
         model = nn.DataParallel(model)
         model_without_ddp = model.module
@@ -176,7 +178,6 @@ def main(args):
         if num_of_dataset_train == 1:
             dataset_train = build_dataset(image_set='train', args=args, datasetinfo=dataset_meta["train"][0])
         else:
-            from jittor.dataset import ConcatDataset
             dataset_train_list = []
             for idx in range(len(dataset_meta["train"])):
                 dataset_train_list.append(build_dataset(image_set='train', args=args, datasetinfo=dataset_meta["train"][idx]))
@@ -199,10 +200,11 @@ def main(args):
                                  drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
 
     # Jittor的学习率调度器
-    if args.onecyclelr:
-        lr_scheduler = jt.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, 
-                                                  steps_per_epoch=len(data_loader_train), 
-                                                  epochs=args.epochs, pct_start=0.2)
+    if args.onecyclelr: # jt does not have it; args also does not have it
+        # lr_scheduler = jt.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, 
+        #                                           steps_per_epoch=len(data_loader_train), 
+        #                                           epochs=args.epochs, pct_start=0.2)
+        pass
     elif args.multi_step_lr:
         lr_scheduler = jt.lr_scheduler.MultiStepLR(optimizer, milestones=args.lr_drop_list)
     else:
@@ -220,8 +222,6 @@ def main(args):
     if args.resume:
         if args.resume.startswith('https'):
             # Jittor不支持直接从URL加载，需要先下载
-            import urllib.request
-            import tempfile
             with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
                 urllib.request.urlretrieve(args.resume, tmp_file.name)
                 checkpoint = jt.load(tmp_file.name)
@@ -237,7 +237,6 @@ def main(args):
 
     if (not args.resume) and args.pretrain_model_path:
         checkpoint = jt.load(args.pretrain_model_path)['model']
-        from collections import OrderedDict
         _ignorekeywordlist = args.finetune_ignore if args.finetune_ignore else []
         ignorelist = []
 
@@ -354,7 +353,6 @@ def main(args):
     # remove the copied files.
     copyfilelist = vars(args).get('copyfilelist')
     if copyfilelist and args.local_rank == 0:
-        from datasets.data_util import remove
         for filename in copyfilelist:
             print("Removing: {}".format(filename))
             remove(filename)
