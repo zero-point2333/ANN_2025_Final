@@ -11,14 +11,14 @@
 # modified from https://github.com/SwinTransformer/Swin-Transformer-Object-Detection/blob/master/mmdet/models/backbones/swin_transformer.py
 # --------------------------------------------------------
 
-from groundingdino.util.debug_tools import log_text
+from util.debug_tools import log_text
 import numpy as np
 import math
 import jittor as jt
 import jittor.nn as nn
 import jittor.nn as F
 
-from groundingdino.util.misc import NestedTensor
+from util.misc import NestedTensor
 
 class Mlp(nn.Module):
     """Multilayer perceptron."""

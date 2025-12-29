@@ -2,7 +2,7 @@ import os
 import random
 from typing import List
 
-import torch
+import jittor as jt
 
 
 def create_positive_map_from_span(tokenized, token_span, max_text_len=256):
@@ -14,7 +14,9 @@ def create_positive_map_from_span(tokenized, token_span, max_text_len=256):
         - token_span: list with length num_boxes.
             - each item: [start_idx, end_idx]
     """
-    positive_map = torch.zeros((len(token_span), max_text_len), dtype=torch.float)
+    # jt.Var, shape: (num_boxes, max_text_len)
+    positive_map: jt.Var = jt.zeros((len(token_span), max_text_len), dtype=jt.float32)
+
     for j, tok_list in enumerate(token_span):
         for (beg, end) in tok_list:
             beg_pos = tokenized.char_to_token(beg)
@@ -38,10 +40,10 @@ def create_positive_map_from_span(tokenized, token_span, max_text_len=256):
 
             assert beg_pos is not None and end_pos is not None
             if os.environ.get("SHILONG_DEBUG_ONLY_ONE_POS", None) == "TRUE":
-                positive_map[j, beg_pos] = 1
+                positive_map[j, beg_pos] = 1.0
                 break
             else:
-                positive_map[j, beg_pos : end_pos + 1].fill_(1)
+                positive_map[j, beg_pos : end_pos + 1] = 1.0
 
     return positive_map / (positive_map.sum(-1)[:, None] + 1e-6)
 

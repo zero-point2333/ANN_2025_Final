@@ -8,3 +8,9 @@ pycocotools==2.0.7
 transformers==4.46.3
 torch --index-url https://download.pytorch.org/whl/cu121
 torchvision --index-url https://download.pytorch.org/whl/cu121
+jsonlines==4.0.0
+termcolor==2.4.0
+pandas==2.0.3
+seaborn==0.13.2
+emoji==2.15.0
+ipdb==0.13.13

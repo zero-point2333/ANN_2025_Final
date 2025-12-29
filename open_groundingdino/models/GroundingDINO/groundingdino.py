@@ -19,9 +19,9 @@ from typing import List
 
 import jittor as jt
 import jittor.nn as nn
-from groundingdino.util import box_ops, get_tokenlizer
-from groundingdino.util.debug_tools import log_text, log_tensor
-from groundingdino.util.misc import (
+from util import box_ops, get_tokenlizer
+from util.debug_tools import log_text, log_tensor
+from util.misc import (
     NestedTensor,
     accuracy,
     get_world_size,

@@ -23,8 +23,8 @@ import jittor as jt
 import jittor.nn as nn
 from jittor import Var
 
-from groundingdino.util.debug_tools import debug_enabled, log_tensor, log_text
-from groundingdino.util.misc import inverse_sigmoid
+from util.debug_tools import debug_enabled, log_tensor, log_text
+from util.misc import inverse_sigmoid
 
 from .fuse_modules import BiAttentionBlock
 from .ms_deform_attn import MultiScaleDeformableAttention as MSDeformAttn

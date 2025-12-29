@@ -23,7 +23,7 @@ import jittor as jt
 import jittor.nn as nn
 from jittor.models import resnet
 
-from groundingdino.util.misc import NestedTensor, clean_state_dict, is_main_process
+from util.misc import NestedTensor, clean_state_dict, is_main_process
 
 from .position_encoding import PositionEmbeddingLearned, PositionEmbeddingSineHW, build_position_encoding
 from .swin_transformer import build_swin_transformer

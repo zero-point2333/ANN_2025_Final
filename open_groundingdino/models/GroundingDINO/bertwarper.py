@@ -10,7 +10,7 @@ import jittor as jt
 from jittor import nn
 from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
 from transformers import BertModel
-from groundingdino.util.debug_tools import log_text
+from util.debug_tools import log_text
 class BertModelWarper(nn.Module):
     def __init__(self, bert_model):
         super().__init__()

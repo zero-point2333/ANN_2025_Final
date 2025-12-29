@@ -24,7 +24,7 @@ import math
 import jittor as jt
 from jittor import nn
 
-from groundingdino.util.misc import NestedTensor
+from util.misc import NestedTensor
 
 
 class PositionEmbeddingSine(nn.Module):
