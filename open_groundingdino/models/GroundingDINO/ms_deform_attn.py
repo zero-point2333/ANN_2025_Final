@@ -3,6 +3,7 @@
 # ------------------------------------------------------------------------
 
 import math
+import os
 import warnings
 from typing import Optional
 
@@ -250,3 +251,119 @@ class MultiScaleDeformableAttention(nn.Module):
             output = output.permute(1, 0, 2)
 
         return output
+
+def ms_deform_attn_forward(
+    value: jt.Var, 
+    spatial_shapes: jt.Var,
+    level_start_index: jt.Var,
+    sampling_loc: jt.Var,
+    attn_weight: jt.Var,
+    grad_output: jt.Var,
+    im2col_step: int
+):
+    current_dir = os.path.dirname(os.path.realpath(__file__))
+    cuda_src_path = os.path.join(current_dir, "src", "ms_deform_attn.cu")
+
+    with open(cuda_src_path, "r") as f:
+        # Read the file content
+        kernel_source = f.read()
+    # ... (Asserts omitted as in original code) ...
+
+    batch = value.shape[0]
+    spatial_size = value.shape[1]
+    num_heads = value.shape[2]
+    channels = value.shape[3]
+
+    num_levels = spatial_shapes.shape[0]
+
+    num_query = sampling_loc.shape[1]
+    num_point = sampling_loc.shape[4]
+
+    im2col_step_ = min(batch, im2col_step)
+
+    if batch % im2col_step_ != 0:
+        raise KeyError(f"batch({batch}) must divide im2col_step({im2col_step_})")
+
+    # Initialize outputs
+    grad_value = jt.zeros_like(value)
+    grad_sampling_loc = jt.zeros_like(sampling_loc)
+    grad_attn_weight = jt.zeros_like(attn_weight)
+
+    batch_n = im2col_step_
+    per_value_size = spatial_size * num_heads * channels
+    per_sample_loc_size = num_query * num_heads * num_levels * num_point * 2
+    per_attn_weight_size = num_query * num_heads * num_levels * num_point
+    
+    # Reshape grad_output for batching
+    grad_output_n = grad_output.view((batch // im2col_step_, batch_n, num_query, num_heads, channels))
+    
+    # Define the C++ kernel signature (Header)
+    # Ensure the actual implementation of 'ms_deformable_col2im_cuda' is available 
+    # to the compiler (e.g., included in a .cu file you load, or linked).
+    cuda_header = f"""
+    #include <cuda_runtime.h>
+    #include <vector>
+    #include <algorithm>
+    
+    // Inject the content of your .cu file here
+    {kernel_source}
+    """
+
+    for n in range(0, batch // im2col_step_):
+        grad_output_g = grad_output_n[n]
+        
+        # We construct the C++ source code string for this iteration
+        # @inX_p gives the raw pointer to the X-th input variable
+        # in0_type gives the C++ type of the 0-th input (e.g., float)
+        cuda_src = f"""
+            using scalar_t = in0_type;
+
+            // Cast input pointers to mutable because we are writing to them inplace
+            // In Jittor, inputs are const by default in the kernel wrapper
+            scalar_t* grad_value_ptr = const_cast<scalar_t*>(@in6_p);
+            scalar_t* grad_sampling_loc_ptr = const_cast<scalar_t*>(@in7_p);
+            scalar_t* grad_attn_weight_ptr = const_cast<scalar_t*>(@in8_p);
+
+            // Offsets calculation
+            int n = {n};
+            int im2col_step_ = {im2col_step_};
+            long per_value_size = {per_value_size};
+            long per_sample_loc_size = {per_sample_loc_size};
+            long per_attn_weight_size = {per_attn_weight_size};
+
+            ms_deformable_col2im_cuda(
+                0, // Use default stream or q.stream() if managed internally
+                @in5_p, // grad_output_g
+                @in0_p + n * im2col_step_ * per_value_size, // value
+                (int64_t*)@in1_p, // spatial_shapes
+                (int64_t*)@in2_p, // level_start_index
+                @in3_p + n * im2col_step_ * per_sample_loc_size, // sampling_loc
+                @in4_p + n * im2col_step_ * per_attn_weight_size, // attn_weight
+                {batch_n}, {spatial_size}, {num_heads}, {channels}, {num_levels}, {num_query}, {num_point},
+                grad_value_ptr + n * im2col_step_ * per_value_size,
+                grad_sampling_loc_ptr + n * im2col_step_ * per_sample_loc_size,
+                grad_attn_weight_ptr + n * im2col_step_ * per_attn_weight_size
+            );
+        """
+
+        # Execute the kernel
+        # We pass the output vars (grad_value etc) as inputs so we can access their pointers
+        # and modify them in place via const_cast in the C++ code.
+        jt.code(
+            inputs=[
+                value,              # in0
+                spatial_shapes,     # in1
+                level_start_index,  # in2
+                sampling_loc,       # in3
+                attn_weight,        # in4
+                grad_output_g,      # in5
+                grad_value,         # in6 (Modified inplace)
+                grad_sampling_loc,  # in7 (Modified inplace)
+                grad_attn_weight    # in8 (Modified inplace)
+            ],
+            outputs=[], # No new outputs created, side effects only
+            cuda_header=cuda_header,
+            cuda_src=cuda_src
+        )
+
+    return grad_value, grad_sampling_loc, grad_attn_weight

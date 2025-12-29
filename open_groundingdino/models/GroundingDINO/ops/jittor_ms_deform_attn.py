@@ -1,5 +1,5 @@
 # groundingdino/models/GroundingDINO/ops/jittor_ms_deform_attn.py
-# Jittor pure-Python port of ms_deform_attn_core_pytorch (for Deformable DETR / GroundingDINO)
+# Jittor pure-Python port of ms_deform_attn_core_jittor (for Deformable DETR / GroundingDINO)
 # This implementation uses jittor.nn.grid_sample and relies on autograd provided by Jittor.
 
 import jittor as jt
