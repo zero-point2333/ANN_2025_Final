@@ -15,13 +15,15 @@
 # ------------------------------------------------------------------------
 
 
+import os
+from scipy.optimize import linear_sum_assignment
+
 import jittor as jt
 from jittor import nn
-import numpy as np
-from scipy.optimize import linear_sum_assignment
-import os
 
 from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
+
+from GroundingDINO.groundingdino.util.utils import cdist
 
 
 class HungarianMatcher(nn.Module):
@@ -46,6 +48,7 @@ class HungarianMatcher(nn.Module):
 
         self.focal_alpha = focal_alpha
 
+    @jt.no_grad()
     def execute(self, outputs, targets, label_map):
         """ Performs the matching
         Params:
@@ -78,69 +81,49 @@ class HungarianMatcher(nn.Module):
         alpha = self.focal_alpha
         gamma = 2.0
 
-        new_label_map = label_map[tgt_ids.numpy()]
-        new_label_map = jt.array(new_label_map)  # 转换为jittor tensor
+        new_label_map=label_map[tgt_ids]
 
-        # 计算分类代价
         neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
         pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
+        new_label_map=new_label_map
         
-        # 确保new_label_map在同一设备上
-        if new_label_map.place is not None and new_label_map.place != out_prob.place:
-            new_label_map = new_label_map.to(out_prob.place)
-        
-        # 计算bbox距离代价
-        # Jittor的cdist函数需要从jittor.nn导入
-        from jittor.nn import cdist
         cost_bbox = cdist(out_bbox, tgt_bbox, p=1)
 
-        # 计算分类代价
-        cost_class = []
-        for idx_map in new_label_map:       
+        # cost_class=(pos_cost_class @ new_label_map.T - neg_cost_class@ new_label_map.T)
+        cost_class=[]
+        for idx_map in new_label_map:
+            assert isinstance(idx_map, jt.Var)
             idx_map = idx_map / idx_map.sum()
-            cost_class.append(pos_cost_class @ idx_map - neg_cost_class @ idx_map)
-        
-        if len(cost_class) > 0:
-            cost_class = jt.stack(cost_class, dim=0).transpose(0, 1)
+            cost_class.append(pos_cost_class @ idx_map - neg_cost_class@ idx_map)
+        if cost_class:
+            cost_class=jt.transpose(jt.stack(cost_class,dim=0), (0, 1))
         else:
-            cost_class = jt.zeros_like(cost_bbox)
-
-        # Compute the giou cost between boxes
-        out_bbox_xyxy = box_cxcywh_to_xyxy(out_bbox)
-        tgt_bbox_xyxy = box_cxcywh_to_xyxy(tgt_bbox)
-        cost_giou = -generalized_box_iou(out_bbox_xyxy, tgt_bbox_xyxy)
+            cost_class=jt.zeros_like(cost_bbox)
+        # Compute the L1 cost between boxes
         
+
+        # Compute the giou cost betwen boxes
+        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
+        # import pdb;pdb.set_trace()
         # Final cost matrix
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
+        assert isinstance(C, jt.Var)
         C = C.view(bs, num_queries, -1)
-        
-        # 处理NaN和Inf
-        C = jt.ternary(jt.isnan(C), jt.zeros_like(C), C)
-        C = jt.ternary(jt.isinf(C), jt.zeros_like(C), C)
-        
-        # 转换为numpy用于scipy的linear_sum_assignment
-        C_np = C.numpy()
-        
+        C[jt.isnan(C)] = 0.0
+        C[jt.isinf(C)] = 0.0
+
         sizes = [len(v["boxes"]) for v in targets]
-        indices = []
-        
         try:
-            for i, c in enumerate(C_np):
-                # 分割出当前batch的cost矩阵
-                c_split = np.split(c, np.cumsum(sizes)[:-1], axis=-1)[i]
-                row_ind, col_ind = linear_sum_assignment(c_split)
-                indices.append((jt.array(row_ind, dtype=jt.int64), 
-                               jt.array(col_ind, dtype=jt.int64)))
+            indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
         except:
             print("warning: use SimpleMinsumMatcher")
             indices = []
-            for i, (c, _size) in enumerate(zip(C.split(sizes, dim=-1), sizes)):
+            for i, (c, _size) in enumerate(zip(C.split(sizes, -1), sizes)):
                 weight_mat = c[i]
-                idx_i = weight_mat.min(dim=0)[1]
-                idx_j = jt.arange(_size, dtype=jt.int64)
+                idx_i = weight_mat.min(0)[1]
+                idx_j = jt.arange(_size)
                 indices.append((idx_i, idx_j))
-        
-        return indices
+        return [(jt.array(i, dtype=jt.int64), jt.array(j, dtype=jt.int64)) for i, j in indices]
 
 
 class SimpleMinsumMatcher(nn.Module):
@@ -165,6 +148,7 @@ class SimpleMinsumMatcher(nn.Module):
 
         self.focal_alpha = focal_alpha
 
+    @jt.no_grad()
     def execute(self, outputs, targets):
         """ Performs the matching
         Params:
@@ -198,60 +182,41 @@ class SimpleMinsumMatcher(nn.Module):
         gamma = 2.0
         neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
         pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
-        
-        # 通过索引选择对应的分类代价
-        tgt_ids_expanded = tgt_ids.view(1, -1).expand(out_prob.shape[0], -1)
-        pos_selected = jt.zeros_like(out_prob)
-        neg_selected = jt.zeros_like(out_prob)
-        
-        # 使用gather操作
-        batch_indices = jt.arange(out_prob.shape[0]).view(-1, 1).expand(-1, tgt_ids.shape[0])
-        pos_selected = pos_cost_class[batch_indices, tgt_ids_expanded]
-        neg_selected = neg_cost_class[batch_indices, tgt_ids_expanded]
-        cost_class = pos_selected - neg_selected
+        cost_class = pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]
 
         # Compute the L1 cost between boxes
-        from jittor.nn import cdist
         cost_bbox = cdist(out_bbox, tgt_bbox, p=1)
-        
-        # Compute the giou cost between boxes            
-        out_bbox_xyxy = box_cxcywh_to_xyxy(out_bbox)
-        tgt_bbox_xyxy = box_cxcywh_to_xyxy(tgt_bbox)
-        cost_giou = -generalized_box_iou(out_bbox_xyxy, tgt_bbox_xyxy)
+            
+        # Compute the giou cost betwen boxes            
+        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
 
         # Final cost matrix
+        
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
         C = C.view(bs, num_queries, -1)
 
         sizes = [len(v["boxes"]) for v in targets]
         indices = []
-        
-        for i, (c, _size) in enumerate(C.split(sizes, dim=-1)):
+        for i, (c, _size) in enumerate(zip(C.split(sizes, -1), sizes)):
             weight_mat = c[i]
-            idx_i = weight_mat.min(dim=0)[1]
-            idx_j = jt.arange(_size, dtype=jt.int64)
+            idx_i = weight_mat.min(0)[1]
+            idx_j = jt.arange(_size)
             indices.append((idx_i, idx_j))
 
-        return indices
+        return [(jt.array(i, dtype=jt.int64), jt.as_tensor(j, dtype=jt.int64)) for i, j in indices]
 
 
 def build_matcher(args):
-    assert args.matcher_type in ['HungarianMatcher', 'SimpleMinsumMatcher'], \
-        f"Unknown args.matcher_type: {args.matcher_type}"
-    
+    assert args.matcher_type in ['HungarianMatcher', 'SimpleMinsumMatcher'], "Unknown args.matcher_type: {}".format(args.matcher_type)
     if args.matcher_type == 'HungarianMatcher':
         return HungarianMatcher(
-            cost_class=args.set_cost_class, 
-            cost_bbox=args.set_cost_bbox, 
-            cost_giou=args.set_cost_giou,
+            cost_class=args.set_cost_class, cost_bbox=args.set_cost_bbox, cost_giou=args.set_cost_giou,
             focal_alpha=args.focal_alpha
         )
     elif args.matcher_type == 'SimpleMinsumMatcher':
         return SimpleMinsumMatcher(
-            cost_class=args.set_cost_class, 
-            cost_bbox=args.set_cost_bbox, 
-            cost_giou=args.set_cost_giou,
+            cost_class=args.set_cost_class, cost_bbox=args.set_cost_bbox, cost_giou=args.set_cost_giou,
             focal_alpha=args.focal_alpha
         )    
     else:
-        raise NotImplementedError(f"Unknown args.matcher_type: {args.matcher_type}")
+        raise NotImplementedError("Unknown args.matcher_type: {}".format(args.matcher_type))

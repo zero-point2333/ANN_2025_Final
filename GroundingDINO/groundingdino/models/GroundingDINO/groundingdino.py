@@ -325,7 +325,7 @@ class GroundingDINO(nn.Module):
                     src = self.input_proj[l](srcs[-1])
                 m = samples.mask
                 mask = nn.interpolate(jt.array(m)[None].float(), size=src.shape[-2:], mode='nearest').bool()[0] # original torch.nn.F.interpolate is on 'nearest' mode
-                pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype)
+                pos_l = jt.type_as(self.backbone[1](NestedTensor(src, mask)), src)
                 srcs.append(src)
                 masks.append(mask)
                 self.poss.append(pos_l)

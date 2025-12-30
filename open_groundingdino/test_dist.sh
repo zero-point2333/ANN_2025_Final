@@ -11,5 +11,5 @@ python main.py \
         --eval \
         -c ${CFG} \
         --datasets ${DATASETS}  \
-        --pretrain_model_path /path/to/groundingdino_swint_ogc.pth \
-        --options text_encoder_type=/path/to/bert-base-uncased
+        --pretrain_model_path ./gdinot-1.8m-odvg.pth \
+        --options text_encoder_type=./bert-base-uncased

@@ -710,7 +710,7 @@ class SwinTransformer(nn.Module):
         for idx, out_i in enumerate(outs):
             m = tensor_list.mask
             assert m is not None
-            mask = F.interpolate(jt.array(m)[None].float(), size=out_i.shape[-2:]).to(jt.bool)[0]
+            mask = F.interpolate(jt.array(m)[None].float(), size=out_i.shape[-2:]).bool()[0]
             outs_dict[idx] = NestedTensor(out_i.numpy(), mask.numpy())
 
         return outs_dict

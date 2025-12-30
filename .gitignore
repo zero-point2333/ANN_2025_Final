@@ -165,3 +165,5 @@ tmp/
 coco/
 
 instances_val2017.json
+
+*aquarium_data*

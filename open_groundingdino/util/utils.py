@@ -543,3 +543,28 @@ def get_phrases_from_posmap(
         return tokenizer.decode(token_ids)
     else:
         raise NotImplementedError("posmap must be 1-dim")
+    
+def cdist(x1, x2, p=2.0):
+    """
+    模拟 torch.cdist 的实现
+    x1: [..., P, M]
+    x2: [..., R, M]
+    返回: [..., P, R]
+    """
+    # 扩展维度以进行广播
+    # x1 变为 [..., P, 1, M]
+    # x2 变为 [..., 1, R, M]
+    x1_exp = x1.unsqueeze(-2)
+    x2_exp = x2.unsqueeze(-3)
+    
+    # 计算差值 -> 绝对值 -> p次方 -> 求和 -> 开p次方
+    # Jittor 会自动融合这些操作
+    diff = (x1_exp - x2_exp).abs()
+    
+    # 针对 p=2 和 p=1 的常见情况可以微调，这里使用通用公式
+    if p == 2.0:
+        return (diff.sqr()).sum(dim=-1).sqrt()
+    elif p == 1.0:
+        return diff.sum(dim=-1)
+    else:
+        return diff.pow(p).sum(dim=-1).pow(1.0/p)

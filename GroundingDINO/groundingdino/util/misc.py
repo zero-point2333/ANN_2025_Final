@@ -306,12 +306,37 @@ class NestedTensor(object):
             res.append(np.array([maxH, maxW], dtype=np.float32))
         return res
 
-    def to(self, device):
+    def to(self, dtype):
+        print("You are using an incomplete method. Check groundingdino/util/misc.py/NestedTensor.to() to refine it.")
         """
-        For compatibility with the original PyTorch API:
-        in Jittor we do not move data by device string here, so this is a no-op.
+        Convert the data type of tensors and mask if dtype is provided.
+        For device strings, this remains a no-op for Jittor compatibility.
         """
-        return self
+        if isinstance(dtype, jt.dtype):  # 检查是否为 Jittor 数据类型
+            # 转换 tensors
+            if isinstance(self.tensors, jt.Var):
+                new_tensors = self.tensors.to(dtype)
+            elif hasattr(self.tensors, 'astype'):  # numpy 数组
+                new_tensors = self.tensors.astype(dtype)
+            else:
+                new_tensors = self.tensors  # 其他类型不变
+            
+            # 转换 mask
+            if self.mask is not None:
+                if isinstance(self.mask, jt.Var):
+                    new_mask = self.mask.to(dtype)
+                elif hasattr(self.mask, 'astype'):  # numpy 数组
+                    new_mask = self.mask.astype(dtype)
+                else:
+                    new_mask = self.mask
+            else:
+                new_mask = self.mask
+            
+            # 返回新的 NestedTensor 实例
+            return NestedTensor(new_tensors, new_mask)
+        else:
+            # 非数据类型参数（例如设备字符串），保持 no-op
+            return self
 
     def to_img_list_single(self, tensor, mask):
         assert tensor.ndim == 3, f"dim of tensor should be 3 but {tensor.ndim}"

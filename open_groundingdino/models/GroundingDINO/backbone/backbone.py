@@ -140,7 +140,7 @@ class BackboneBase(nn.Module):
             m = tensor_list.mask
             assert m is not None
             # Jittor的interpolate用法
-            mask = nn.interpolate(jt.array(m).float().unsqueeze(0), size=x.shape[-2:]).to(jt.bool).squeeze(0)
+            mask = nn.interpolate(jt.array(m).float().unsqueeze(0), size=x.shape[-2:]).bool().squeeze(0)
             out[name] = NestedTensor(x.numpy(), mask.numpy())
         return out
 
@@ -202,7 +202,7 @@ class Joiner(nn.Module):
         for _, x in xs.items():
             out.append(x)
             # position encoding
-            pos.append(self.position_embedding(x).to(x.tensors.dtype))
+            pos.append(jt.type_as(self.position_embedding(x), x.tensors))
 
         return out, pos
 

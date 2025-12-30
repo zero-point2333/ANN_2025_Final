@@ -145,7 +145,7 @@ class BertModelWarper(nn.Module):
             attention_mask_pt, input_shape
         )
         # Ensure attention mask is float32 to match query dtype
-        extended_attention_mask = extended_attention_mask.float()
+        extended_attention_mask = extended_attention_mask.float() # eam is tensor in torch
 
         # If a 2D or 3D attention mask is provided for the cross-attention
         # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]

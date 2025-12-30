@@ -8,6 +8,30 @@ import time
 from pathlib import Path
 import os, sys
 import numpy as np
+
+# =======================
+# CPU-only hard switches
+# (MUST be set before importing groundingdino.util.inference which imports jittor)
+# =======================
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_DATASETS_OFFLINE"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# 1) Tell Jittor "do NOT use cuda" via flag-style env var
+os.environ["use_cuda"] = "0"
+# 2) Prevent CUDA toolchain auto-enable / auto-download
+os.environ["nvcc_path"] = ""
+# 3) Hide GPUs from CUDA runtime (use empty string; avoid -1 which can be quirky)
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+# 4) Avoid multiprocess compiler pool (sandbox blocks semaphores)
+os.environ["DISABLE_MULTIPROCESSING"] = "1"
+# 5) Point Jittor at the right pythonX.Y-config so it won't try to compile against system python
+exe_real = os.path.realpath(sys.executable)
+py_config = os.path.join(os.path.dirname(exe_real), f"python{sys.version_info.major}.{sys.version_info.minor}-config")
+os.environ.setdefault("python_config_path", py_config)
+# Enable verbose NaN/Inf diagnostics
+os.environ.setdefault("GROUNDINGDINO_DEBUG_NAN", "1")
+
 import jittor as jt
 from jittor import nn
 from jittor.dataset import DataLoader
@@ -75,7 +99,7 @@ def get_args_parser():
     parser.add_argument("--local_rank", type=int, help='local rank for DistributedDataParallel')
     parser.add_argument('--amp', action='store_true',
                         help="Train with mixed precision")
-    parser.add_argument("--use_coco_eval", default=False, type=bool, help="use coco evaluation")
+    # parser.add_argument("--use_coco_eval", default=False, type=bool, help="use coco evaluation")
     return parser
 
 
@@ -360,7 +384,6 @@ def main(args):
 
 if __name__ == '__main__':
     # 初始化Jittor
-    jt.flags.use_cuda = 1
     parser = argparse.ArgumentParser('DETR training and evaluation script', parents=[get_args_parser()])
     args = parser.parse_args()
     if args.output_dir:

@@ -17,5 +17,5 @@ srun -p ${PARTITION} \
     python -u main.py --output_dir ${OUTPUT_DIR} \
         -c ${CFG} \
         --datasets ${DATASETS}  \
-        --pretrain_model_path /path/to/groundingdino_swint_ogc.pth \
-        --options text_encoder_type=/path/to/bert-base-uncased
+        --pretrain_model_path /home/cslabuser/ANN_2025_Final/open_groundingdino/gdinot-1.8m-odvg.pth \
+        --options text_encoder_type=/home/cslabuser/ANN_2025_Final/open_groundingdino/bert-base-uncased

@@ -13,6 +13,16 @@ FROM python:3.8
 # 设置环境变量
 ENV WORKDIR=/workspace
 
+# CUDA设置
+RUN rm -rf /root/.cache/jittor/jt1.3.10
+
+ENV NVCC_PATH=/home/cslabuser/.cache/jittor/jtcuda/cuda12.2_cudnn8_linux/bin/nvcc \
+    nvcc_path=/home/cslabuser/.cache/jittor/jtcuda/cuda12.2_cudnn8_linux/bin/nvcc \
+    PATH=/home/cslabuser/.cache/jittor/jtcuda/cuda12.2_cudnn8_linux/bin:$PATH \
+    DISABLE_MULTIPROCESSING=1 \
+    JT_USE_CUDA=1 \
+    CUDA_VISIBLE_DEVICES=0
+
 # 安装系统依赖
 RUN apt-get -y update
 RUN apt-get -y install libgl1
@@ -26,6 +36,7 @@ WORKDIR $WORKDIR
 
 # 复制本地GroundingDINO项目到容器
 COPY . .
+
 
 # 安装Python依赖
 RUN pip install --upgrade pip
