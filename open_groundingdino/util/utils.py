@@ -568,3 +568,21 @@ def cdist(x1, x2, p=2.0):
         return diff.sum(dim=-1)
     else:
         return diff.pow(p).sum(dim=-1).pow(1.0/p)
+
+def div_trunc(input, other):
+    """
+    实现了类似 torch.div 的除法，支持 rounding_mode 参数。
+    
+    Args:
+        input (jt.Var): 被除数
+        other (jt.Var or float): 除数
+        rounding_mode (str, optional): 舍入模式。
+            - None: 默认真除法 (True Division)
+            - "trunc": 向零取整 (Truncate towards zero)
+            - "floor": 向下取整 (Floor division)
+    """
+    # 1. 执行基础除法
+    result = input / other
+    assert isinstance(result, jt.Var)
+    
+    return result.int64()

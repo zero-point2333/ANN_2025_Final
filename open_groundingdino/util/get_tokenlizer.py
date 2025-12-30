@@ -21,12 +21,6 @@ def get_tokenlizer(text_encoder_type):
                 "Unknown type of text_encoder_type: {}".format(type(text_encoder_type))
             )
     print("final text_encoder_type: {}".format(text_encoder_type))
-    if os.path.isdir(text_encoder_type) and os.path.exists(text_encoder_type):
-        local_dir = text_encoder_type
-    else:
-        model_id = MODELSCOPE_MAPPING.get(text_encoder_type, text_encoder_type)
-        cache_root = "/modelscope"
-        local_dir = os.path.join(cache_root, "hub", "models", model_id)
     # 新增：检查是否为 ModelScope 模型ID
     model_id = MODELSCOPE_MAPPING.get(text_encoder_type, text_encoder_type)
     
@@ -34,7 +28,7 @@ def get_tokenlizer(text_encoder_type):
     cache_root = "/modelscope"
     local_dir = os.path.join(cache_root, "hub", "models", model_id)
     if not os.path.exists(local_dir):
-        orig_home = os.environ.get("GROUNDINGDINO_ORIG_HOME")
+        orig_home = os.path.expanduser("~")
         if orig_home:
             alt_dir = os.path.join(orig_home, ".cache", "modelscope", "hub", "models", model_id)
             if os.path.exists(alt_dir):
@@ -48,17 +42,11 @@ def get_tokenlizer(text_encoder_type):
 
 
 def get_pretrained_language_model(text_encoder_type):
-    if os.path.isdir(text_encoder_type) and os.path.exists(text_encoder_type):
-        local_dir = text_encoder_type
-    else:
-        model_id = MODELSCOPE_MAPPING.get(text_encoder_type, text_encoder_type)
-        cache_root = "/modelscope"
-        local_dir = os.path.join(cache_root, "hub", "models", model_id)
     model_id = MODELSCOPE_MAPPING.get(text_encoder_type, text_encoder_type)
     cache_root = "/modelscope"
     local_dir = os.path.join(cache_root, "hub", "models", model_id)
     if not os.path.exists(local_dir):
-        orig_home = os.environ.get("GROUNDINGDINO_ORIG_HOME")
+        orig_home = os.path.expanduser("~")
         if orig_home:
             alt_dir = os.path.join(orig_home, ".cache", "modelscope", "hub", "models", model_id)
             if os.path.exists(alt_dir):

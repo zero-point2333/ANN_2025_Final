@@ -29,7 +29,7 @@ from util.misc import (
     is_dist_avail_and_initialized,
     nested_tensor_from_tensor_list,
 )
-from util.utils import get_phrases_from_posmap
+from util.utils import div_trunc, get_phrases_from_posmap
 from util.visualizer import COCOVisualizer
 from util.vl_utils import create_positive_map_from_span
 
@@ -588,8 +588,8 @@ class SetCriterion(nn.Module):
                     }
                     inds = self.matcher(aux_output_single, [targets[j]], label_map_list[j])
                     indices.extend(inds)
-                one_hot_aux = torch.zeros(outputs['pred_logits'].size(),dtype=torch.int64)
-                tgt_ids = [v["labels"].cpu() for v in targets]
+                one_hot_aux = jt.zeros(outputs['pred_logits'].size(),dtype=jt.int64)
+                tgt_ids = [v["labels"] for v in targets]
                 for i in range(len(indices)):
                     tgt_ids[i]=tgt_ids[i][indices[i][1]]
                     one_hot_aux[i,indices[i][0]] = jt.array(label_map_list[i][tgt_ids[i]], dtype=jt.int64)
@@ -614,7 +614,7 @@ class SetCriterion(nn.Module):
                 }
                 inds = self.matcher(interm_output_single, [targets[j]], label_map_list[j])
                 indices.extend(inds)
-            one_hot_aux = torch.zeros(outputs['pred_logits'].size(),dtype=torch.int64)
+            one_hot_aux = jt.zeros(outputs['pred_logits'].size(),dtype=jt.int64)
             tgt_ids = [v["labels"].cpu() for v in targets]
             for i in range(len(indices)):
                 tgt_ids[i]=tgt_ids[i][indices[i][1]]
@@ -651,13 +651,13 @@ class PostProcess(nn.Module):
             cat_list=args.label_list
         caption = " . ".join(cat_list) + ' .'
         tokenized = self.tokenizer(caption, padding="longest", return_tensors="pt")
-        label_list = torch.arange(len(cat_list))
+        label_list = jt.arange(len(cat_list))
         pos_map=create_positive_map(tokenized,label_list,cat_list,caption)
         # build a mapping from label_id to pos_map
         if args.use_coco_eval:
             id_map = {0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 9, 9: 10, 10: 11, 11: 13, 12: 14, 13: 15, 14: 16, 15: 17, 16: 18, 17: 19, 18: 20, 19: 21, 20: 22, 21: 23, 22: 24, 23: 25, 24: 27, 25: 28, 26: 31, 27: 32, 28: 33, 29: 34, 30: 35, 31: 36, 32: 37, 33: 38, 34: 39, 35: 40, 36: 41, 37: 42, 38: 43, 39: 44, 40: 46,
                     41: 47, 42: 48, 43: 49, 44: 50, 45: 51, 46: 52, 47: 53, 48: 54, 49: 55, 50: 56, 51: 57, 52: 58, 53: 59, 54: 60, 55: 61, 56: 62, 57: 63, 58: 64, 59: 65, 60: 67, 61: 70, 62: 72, 63: 73, 64: 74, 65: 75, 66: 76, 67: 77, 68: 78, 69: 79, 70: 80, 71: 81, 72: 82, 73: 84, 74: 85, 75: 86, 76: 87, 77: 88, 78: 89, 79: 90}
-            new_pos_map = torch.zeros((91, 256))
+            new_pos_map = jt.zeros((91, 256))
             for k, v in id_map.items():
                 new_pos_map[v] = pos_map[k]
             pos_map=new_pos_map
@@ -666,7 +666,7 @@ class PostProcess(nn.Module):
         self.nms_iou_threshold=nms_iou_threshold
         self.positive_map = pos_map
 
-    @torch.no_grad()
+    @jt.no_grad()
     def execute(self, outputs, target_sizes, not_to_xyxy=False, test=False):
         """ Perform the computation
         Parameters:
@@ -675,25 +675,27 @@ class PostProcess(nn.Module):
                           For evaluation, this must be the original image size (before any data augmentation)
                           For visualization, this should be the image size after data augment, but before padding
         """
+        assert isinstance(target_sizes, jt.Var)
         num_select = self.num_select
         out_logits, out_bbox = outputs['pred_logits'], outputs['pred_boxes']
 
-
+        assert isinstance(out_logits, jt.Var)
         prob_to_token = out_logits.sigmoid()
         pos_maps = self.positive_map
         for label_ind in range(len(pos_maps)):
+            assert isinstance(pos_maps[label_ind], jt.Var)
             if pos_maps[label_ind].sum() != 0:
                 pos_maps[label_ind]=pos_maps[label_ind]/pos_maps[label_ind].sum()
 
-        prob_to_label = prob_to_token @ pos_maps.T
+        prob_to_label = nn.matmul_transpose(prob_to_token, pos_maps)
 
         assert len(out_logits) == len(target_sizes)
         assert target_sizes.shape[1] == 2
 
         prob = prob_to_label
-        topk_values, topk_indexes = torch.topk(prob.view(prob.shape[0], -1), num_select, dim=1)
+        topk_values, topk_indexes = jt.topk(prob.view(prob.shape[0], -1), num_select, dim=1)
         scores = topk_values
-        topk_boxes = torch.div(topk_indexes, prob.shape[2], rounding_mode='trunc')
+        topk_boxes = div_trunc(topk_indexes, prob.shape[2])
         labels = topk_indexes % prob.shape[2]
         if not_to_xyxy:
             boxes = out_bbox
@@ -703,15 +705,16 @@ class PostProcess(nn.Module):
         # if test:
         #     assert not not_to_xyxy
         #     boxes[:,:,2:] = boxes[:,:,2:] - boxes[:,:,:2]
-        boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))
+        assert isinstance(topk_boxes, jt.Var)
+        boxes = jt.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))
         
         # and from relative [0, 1] to absolute [0, height] coordinates
-        img_h, img_w = target_sizes.unbind(1)
-        scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
+        img_h, img_w = jt.unbind(target_sizes, 1)
+        scale_fct = jt.stack([img_w, img_h, img_w, img_h], dim=1)
         boxes = boxes * scale_fct[:, None, :]
 
         if self.nms_iou_threshold > 0:
-            item_indices = [nms(b, s, iou_threshold=self.nms_iou_threshold) for b,s in zip(boxes, scores)]
+            item_indices = [jt.nms((x1, y1, x2, y2, s), thresh=self.nms_iou_threshold) for (x1, y1, x2, y2), s in zip(boxes, scores)]
 
             results = [{'scores': s[i], 'labels': l[i], 'boxes': b[i]} for s, l, b, i in zip(scores, labels, boxes, item_indices)]
         else:
@@ -803,7 +806,7 @@ def build_groundingdino(args):
 
 def create_positive_map(tokenized, tokens_positive,cat_list,caption):
     """construct a map such that positive_map[i,j] = True iff box i is associated to token j"""
-    positive_map = torch.zeros((len(tokens_positive), 256), dtype=torch.float)
+    positive_map = jt.zeros((len(tokens_positive), 256), dtype=jt.float32)
 
     for j,label in enumerate(tokens_positive):
 
