@@ -233,6 +233,13 @@ class GroundingDINO(nn.Module):
         # encoder texts
 
         tokenized = self.tokenizer(captions, padding="longest", return_tensors="pt")
+        # Convert tokenizer tensors to Jittor Vars to keep Jittor ops consistent.
+        for key in ("input_ids", "attention_mask", "token_type_ids"):
+            if key in tokenized and not isinstance(tokenized[key], jt.Var):
+                val = tokenized[key]
+                if hasattr(val, "detach") and hasattr(val, "cpu") and hasattr(val, "numpy"):
+                    val = val.detach().cpu().numpy()
+                tokenized[key] = jt.array(val)
         one_hot_token = tokenized
 
         (

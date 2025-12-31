@@ -141,7 +141,7 @@ class BackboneBase(nn.Module):
             assert m is not None
             # Jittor的interpolate用法
             mask = nn.interpolate(jt.array(m).float().unsqueeze(0), size=x.shape[-2:]).bool().squeeze(0)
-            out[name] = NestedTensor(x.numpy(), mask.numpy())
+            out[name] = NestedTensor(x, mask.numpy())
         return out
 
 
