@@ -1,8 +1,5 @@
 from __future__ import print_function
-
-import torch
-import torchvision.datasets as datasets
-from torch.utils.data import Dataset
+from jittor.dataset import Dataset
 from PIL import Image
 from .tsv_io import TSVFile
 import numpy as np

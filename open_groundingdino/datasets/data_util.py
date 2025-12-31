@@ -3,9 +3,7 @@ import os.path as osp
 import shutil
 import time
 import datetime
-
-import torch
-
+import sys
 from util.slconfig import SLConfig
 
 class Error(OSError):
@@ -159,7 +157,9 @@ def preparing_dataset(pathdict, image_set, args):
     args.copyfilelist = copyfilelist
         
     if args.distributed:
-        torch.distributed.barrier()
+        torch = sys.modules.get("torch", None)
+        if torch is not None and hasattr(torch, "distributed"):
+            torch.distributed.barrier()
     total_time = time.time() - start_time
     if copyfilelist:
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))

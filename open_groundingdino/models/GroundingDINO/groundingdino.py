@@ -30,6 +30,7 @@ from util.misc import (
     nested_tensor_from_tensor_list,
 )
 from util.utils import div_trunc, get_phrases_from_posmap
+from util.debug_tools import log_tensor, log_text
 from util.visualizer import COCOVisualizer
 from util.vl_utils import create_positive_map_from_span
 
@@ -388,19 +389,15 @@ class GroundingDINO(nn.Module):
         # torch.Size([4, 900, 256])
 
         return out
-
-    # def _set_aux_loss(self, outputs_class, outputs_coord):
-    #     # this is a workaround to make torchscript happy, as torchscript
-    #     # doesn't support dictionary with non-homogeneous values, such
-    #     # as a dict having both a Tensor and a list.
-    #     return [
-    #         {"pred_logits": a, "pred_boxes": b}
-    #         for a, b in zip(outputs_class[:-1], outputs_coord[:-1])
-    #     ]
-
-
-
-
+    def _set_aux_loss(self, outputs_class, outputs_coord):
+        # Build auxiliary outputs without iterating directly over jt.Var.
+        aux_outputs = []
+        num_layers = int(outputs_class.shape[0])
+        for i in range(num_layers - 1):
+            aux_outputs.append(
+                {"pred_logits": outputs_class[i], "pred_boxes": outputs_coord[i]}
+            )
+        return aux_outputs
 class SetCriterion(nn.Module):
     def __init__(self, matcher, weight_dict, focal_alpha,focal_gamma, losses):
         """ Create the criterion.
@@ -441,16 +438,35 @@ class SetCriterion(nn.Module):
         idx = self._get_src_permutation_idx(indices)
         src_boxes = outputs['pred_boxes'][idx]
         target_boxes = jt.concat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-
-        loss_bbox = nn.l1_loss(src_boxes, target_boxes)
-
+        # Use elementwise L1 to keep [num_boxes, 4] for downstream slicing.
+        loss_bbox = (src_boxes - target_boxes).abs()
+        if loss_bbox.ndim == 1:
+            loss_bbox = loss_bbox.reshape(1, -1)
         losses = {}
         losses['loss_bbox'] = loss_bbox.sum() / num_boxes
-
-        loss_giou = 1 - jt.diag(box_ops.generalized_box_iou(
-            box_ops.box_cxcywh_to_xyxy(src_boxes),
-            box_ops.box_cxcywh_to_xyxy(target_boxes)))
-        losses['loss_giou'] = loss_giou.sum() / num_boxes
+        src_xyxy = box_ops.box_cxcywh_to_xyxy(src_boxes)
+        tgt_xyxy = box_ops.box_cxcywh_to_xyxy(target_boxes)
+        if src_xyxy.numel() == 0 or tgt_xyxy.numel() == 0:
+            losses['loss_giou'] = jt.array(0.0)
+        else:
+            invalid = jt.isnan(src_xyxy) | jt.isinf(src_xyxy)
+            if invalid.any().item():
+                src_xyxy = jt.where(invalid, jt.zeros_like(src_xyxy), src_xyxy)
+            invalid = jt.isnan(tgt_xyxy) | jt.isinf(tgt_xyxy)
+            if invalid.any().item():
+                tgt_xyxy = jt.where(invalid, jt.zeros_like(tgt_xyxy), tgt_xyxy)
+            src_xyxy = jt.concat(
+                [jt.minimum(src_xyxy[:, :2], src_xyxy[:, 2:]),
+                 jt.maximum(src_xyxy[:, :2], src_xyxy[:, 2:])],
+                dim=1,
+            )
+            tgt_xyxy = jt.concat(
+                [jt.minimum(tgt_xyxy[:, :2], tgt_xyxy[:, 2:]),
+                 jt.maximum(tgt_xyxy[:, :2], tgt_xyxy[:, 2:])],
+                dim=1,
+            )
+            loss_giou = 1 - jt.diag(box_ops.generalized_box_iou(src_xyxy, tgt_xyxy))
+            losses['loss_giou'] = loss_giou.sum() / num_boxes
 
         # calculate the x,y and h,w loss
         with jt.no_grad():
@@ -538,7 +554,7 @@ class SetCriterion(nn.Module):
         for j in range(len(cat_list)): # bs
             label_map=[]
             for i in range(len(cat_list[j])):
-                label_id = jt.tensor([i])
+                label_id = jt.array([i])
                 per_label = create_positive_map(token[j], label_id, cat_list[j], caption[j])
                 label_map.append(per_label)
             label_map = jt.stack(label_map,dim=0).squeeze(1)
@@ -608,11 +624,34 @@ class SetCriterion(nn.Module):
         # interm_outputs loss
         if 'interm_outputs' in outputs:
             interm_outputs = outputs['interm_outputs']
+            if not hasattr(self, "_debug_interm_logged"):
+                self._debug_interm_logged = True
+                log_text("interm_outputs stats", force=True)
+                log_tensor("interm_outputs.pred_logits", interm_outputs.get("pred_logits"), force=True)
+                log_tensor("interm_outputs.pred_boxes", interm_outputs.get("pred_boxes"), force=True)
+            pred_boxes_dbg = interm_outputs.get("pred_boxes")
+            if isinstance(pred_boxes_dbg, jt.Var):
+                invalid = jt.isnan(pred_boxes_dbg) | jt.isinf(pred_boxes_dbg)
+                if invalid.any().item():
+                    pred_boxes_dbg = jt.where(invalid, jt.zeros_like(pred_boxes_dbg), pred_boxes_dbg)
+                pred_boxes_dbg = jt.clamp(pred_boxes_dbg, min_v=0.0, max_v=1.0)
+                interm_outputs["pred_boxes"] = pred_boxes_dbg
             indices = []
+            pred_logits = interm_outputs['pred_logits']
+            pred_boxes = interm_outputs['pred_boxes']
+            single_interm = (pred_boxes.ndim == 2)
+            interm_bs = 1 if single_interm else int(pred_boxes.shape[0])
             for j in range(len(cat_list)): # bs
+                if single_interm:
+                    pl = pred_logits
+                    pb = pred_boxes
+                else:
+                    jj = j if j < interm_bs else 0
+                    pl = pred_logits[jj]
+                    pb = pred_boxes[jj]
                 interm_output_single = {
-                    'pred_logits' : interm_outputs['pred_logits'][j].unsqueeze(0),
-                    'pred_boxes': interm_outputs['pred_boxes'][j].unsqueeze(0)
+                    'pred_logits' : pl.unsqueeze(0),
+                    'pred_boxes': pb.unsqueeze(0)
                 }
                 inds = self.matcher(interm_output_single, [targets[j]], label_map_list[j])
                 indices.extend(inds)

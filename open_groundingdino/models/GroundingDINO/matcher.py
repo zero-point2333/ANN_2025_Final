@@ -74,15 +74,27 @@ class HungarianMatcher(nn.Module):
         out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
 
         # Also concat the target labels and boxes
-        tgt_ids = jt.concat([v["labels"] for v in targets])
-        tgt_bbox = jt.concat([v["boxes"] for v in targets])
-
+        tgt_ids_list = []
+        tgt_bbox_list = []
+        for v in targets:
+            labels = v["labels"].reshape(-1)
+            boxes = v["boxes"].reshape(-1, 4)
+            n = min(int(labels.shape[0]), int(boxes.shape[0]))
+            tgt_ids_list.append(labels[:n])
+            tgt_bbox_list.append(boxes[:n])
+        tgt_ids = jt.concat(tgt_ids_list)
+        tgt_bbox = jt.concat(tgt_bbox_list)
+        total_targets = sum(int(b.shape[0]) for b in tgt_bbox_list)
+        if total_targets == 0:
+            empty = jt.array([], dtype=jt.int64)
+            return [(empty, empty) for _ in range(bs)]
+        tgt_ids_index = tgt_ids.numpy().tolist()
         # Compute the classification cost.
         alpha = self.focal_alpha
         gamma = 2.0
-
-        new_label_map=label_map[tgt_ids]
-
+        new_label_map=label_map[tgt_ids_index]
+        if new_label_map.ndim == 1:
+            new_label_map = new_label_map.unsqueeze(0)
         neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
         pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
         new_label_map=new_label_map
@@ -96,9 +108,21 @@ class HungarianMatcher(nn.Module):
             idx_map = idx_map / idx_map.sum()
             cost_class.append(pos_cost_class @ idx_map - neg_cost_class@ idx_map)
         if cost_class:
-            cost_class=jt.transpose(jt.stack(cost_class,dim=0), (0, 1))
+            cost_class = jt.transpose(jt.stack(cost_class, dim=0), (1, 0))
         else:
-            cost_class=jt.zeros_like(cost_bbox)
+            cost_class = jt.zeros_like(cost_bbox)
+        target_len = int(cost_bbox.shape[1])
+        if cost_class.ndim == 1:
+            cost_class = cost_class.unsqueeze(1)
+        if cost_class.shape[1] != target_len:
+            if cost_class.shape[1] > target_len:
+                cost_class = cost_class[:, :target_len]
+            else:
+                pad = jt.zeros(
+                    (cost_class.shape[0], target_len - cost_class.shape[1]),
+                    dtype=cost_class.dtype,
+                )
+                cost_class = jt.concat([cost_class, pad], dim=1)
         # Compute the L1 cost between boxes
         
 
@@ -111,18 +135,32 @@ class HungarianMatcher(nn.Module):
         C = C.view(bs, num_queries, -1)
         C[jt.isnan(C)] = 0.0
         C[jt.isinf(C)] = 0.0
-
-        sizes = [len(v["boxes"]) for v in targets]
-        try:
-            indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
-        except:
-            print("warning: use SimpleMinsumMatcher")
-            indices = []
-            for i, (c, _size) in enumerate(zip(C.split(sizes, -1), sizes)):
-                weight_mat = c[i]
-                idx_i = weight_mat.min(0)[1]
-                idx_j = jt.arange(_size)
-                indices.append((idx_i, idx_j))
+        sizes = [int(b.shape[0]) for b in tgt_bbox_list]
+        if bs == 1:
+            total = sizes[0]
+            if C.shape[-1] > total:
+                C = C[:, :, :total]
+            elif C.shape[-1] < total:
+                total = int(C.shape[-1])
+            cost = C[0, :, :total]
+            try:
+                indices = [linear_sum_assignment(cost.numpy())]
+            except:
+                print("warning: use SimpleMinsumMatcher")
+                idx_i = jt.argmax(-cost, 0)
+                idx_j = jt.arange(total)
+                indices = [(idx_i, idx_j)]
+        else:
+            try:
+                indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
+            except:
+                print("warning: use SimpleMinsumMatcher")
+                indices = []
+                for i, (c, _size) in enumerate(zip(C.split(sizes, -1), sizes)):
+                    weight_mat = c[i]
+                    idx_i = jt.argmax(-weight_mat, 0)
+                    idx_j = jt.arange(_size)
+                    indices.append((idx_i, idx_j))
         return [(jt.array(i, dtype=jt.int64), jt.array(j, dtype=jt.int64)) for i, j in indices]
 
 
@@ -174,19 +212,40 @@ class SimpleMinsumMatcher(nn.Module):
         out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
 
         # Also concat the target labels and boxes
-        tgt_ids = jt.concat([v["labels"] for v in targets])
-        tgt_bbox = jt.concat([v["boxes"] for v in targets])
-
+        tgt_ids_list = []
+        tgt_bbox_list = []
+        for v in targets:
+            labels = v["labels"].reshape(-1)
+            boxes = v["boxes"].reshape(-1, 4)
+            n = min(int(labels.shape[0]), int(boxes.shape[0]))
+            tgt_ids_list.append(labels[:n])
+            tgt_bbox_list.append(boxes[:n])
+        tgt_ids = jt.concat(tgt_ids_list)
+        tgt_bbox = jt.concat(tgt_bbox_list)
+        total_targets = sum(int(b.shape[0]) for b in tgt_bbox_list)
+        if total_targets == 0:
+            empty = jt.array([], dtype=jt.int64)
+            return [(empty, empty) for _ in range(bs)]
         # Compute the classification cost.
         alpha = self.focal_alpha
         gamma = 2.0
         neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
         pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
-        cost_class = pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]
-
+        cost_class = pos_cost_class[:, tgt_ids_index] - neg_cost_class[:, tgt_ids_index]
+        if cost_class.ndim == 1:
+            cost_class = cost_class.unsqueeze(1)
+        tgt_ids_index = tgt_ids.numpy().tolist()
         # Compute the L1 cost between boxes
         cost_bbox = cdist(out_bbox, tgt_bbox, p=1)
-            
+        target_len = int(cost_bbox.shape[1])
+        if cost_class.ndim == 1:
+            cost_class = cost_class.unsqueeze(1)
+        if cost_class.shape[1] != target_len:
+            if cost_class.shape[1] > target_len:
+                cost_class = cost_class[:, :target_len]
+            else:
+                pad = jt.zeros((cost_class.shape[0], target_len - cost_class.shape[1]), dtype=cost_class.dtype)
+                cost_class = jt.concat([cost_class, pad], dim=1)
         # Compute the giou cost betwen boxes            
         cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
 
@@ -194,15 +253,24 @@ class SimpleMinsumMatcher(nn.Module):
         
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
         C = C.view(bs, num_queries, -1)
-
-        sizes = [len(v["boxes"]) for v in targets]
-        indices = []
-        for i, (c, _size) in enumerate(zip(C.split(sizes, -1), sizes)):
-            weight_mat = c[i]
-            idx_i = weight_mat.min(0)[1]
-            idx_j = jt.arange(_size)
-            indices.append((idx_i, idx_j))
-
+        sizes = [int(b.shape[0]) for b in tgt_bbox_list]
+        if bs == 1:
+            total = sizes[0]
+            if C.shape[-1] > total:
+                C = C[:, :, :total]
+            elif C.shape[-1] < total:
+                total = int(C.shape[-1])
+            weight_mat = C[0, :, :total]
+            idx_i = jt.argmax(-weight_mat, 0)
+            idx_j = jt.arange(total)
+            indices = [(idx_i, idx_j)]
+        else:
+            indices = []
+            for i, (c, _size) in enumerate(zip(C.split(sizes, -1), sizes)):
+                weight_mat = c[i]
+                idx_i = jt.argmax(-weight_mat, 0)
+                idx_j = jt.arange(_size)
+                indices.append((idx_i, idx_j))
         return [(jt.array(i, dtype=jt.int64), jt.as_tensor(j, dtype=jt.int64)) for i, j in indices]
 
 

@@ -1,20 +1,15 @@
 # borrow from https://github.com/Zzh-tju/CIoU/blob/master/layers/modules/multibox_loss.py
 
 import math
+import sys
 import jittor as jt
 from jittor import Var
-
-# optional: accept torch tensors as input and convert
-try:
-    import torch
-except Exception:
-    torch = None
-
 
 def _to_jt_var(x):
     if isinstance(x, Var):
         return x
-    if torch is not None and isinstance(x, torch.Tensor):
+    torch = sys.modules.get("torch", None)
+    if torch is not None and isinstance(x, getattr(torch, "Tensor", ())):
         return jt.array(x.detach().cpu().numpy())
     return jt.array(x)
 

@@ -62,7 +62,7 @@ def train_one_epoch(model, criterion,
 
         optimizer.zero_grad()
         optimizer.backward(losses)
-        if max_norm > 0:
+        if max_norm > 0 and hasattr(nn, "utils") and hasattr(nn.utils, "clip_grad_norm_"):
             nn.utils.clip_grad_norm_(model.parameters(), max_norm)
         optimizer.step()
 
