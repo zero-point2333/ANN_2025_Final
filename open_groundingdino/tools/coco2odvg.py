@@ -12,7 +12,7 @@ coco_key_list=list(coco_id_map.keys())
 coco_val_list=list(coco_id_map.values())
 
 def dump_label_map(output="./out.json"):
-    ori_map = {"1": "fish", "2": "jellyfish", "3": "penguins", "4": "sharks", "5": "puffins", "6":"stingrays", "7": "starfish"}
+    ori_map = {"1": "fish", "2": "jellyfish", "3": "penguin", "4": "puffin", "5": "shark", "6":"starfish", "7": "stingray"}
     new_map = {}
     for key, value in ori_map.items():
         label = int(key)

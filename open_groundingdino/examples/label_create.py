@@ -4,11 +4,11 @@ import json
 content = {
     "0": "fish",
     "1": "jellyfish",
-    "2": "penguins",
-    "3": "sharks",
-    "4": "puffins",
-    "5": "stingrays",
-    "6": "starfish",
+    "2": "penguin",
+    "3": "puffin",
+    "4": "shark",
+    "5": "starfish",
+    "6": "stingray",
 }
 
 # Define the file path

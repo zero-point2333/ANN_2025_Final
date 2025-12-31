@@ -34,8 +34,7 @@ os.environ.setdefault("GROUNDINGDINO_DEBUG_NAN", "1")
 
 import jittor as jt
 from jittor import nn
-from jittor.dataset import DataLoader
-from jittor.dataset import  SequentialSampler, RandomSampler, BatchSampler
+from jittor.dataset import DataLoader, SequentialSampler, RandomSampler, BatchSampler
 
 from util.get_param_dicts import get_param_dict
 from util.logger import setup_logger
@@ -99,6 +98,7 @@ def get_args_parser():
     parser.add_argument("--local_rank", type=int, help='local rank for DistributedDataParallel')
     parser.add_argument('--amp', action='store_true',
                         help="Train with mixed precision")
+    parser.add_argument("--distributed", default=False, type=bool, help="distributed calculation service")
     # parser.add_argument("--use_coco_eval", default=False, type=bool, help="use coco evaluation")
     return parser
 
@@ -180,7 +180,7 @@ def main(args):
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info('number of params:'+str(n_parameters))
-    logger.info("params before freezing:\n"+json.dumps({n: p.numel() for n, p in model.named_parameters() if p.requires_grad}, indent=2))
+    # logger.info("params before freezing:\n"+json.dumps({n: p.numel() for n, p in model.named_parameters() if p.requires_grad}, indent=2))
 
     param_dicts = get_param_dict(args, model_without_ddp)
     
@@ -191,7 +191,8 @@ def main(args):
                 if keyword in name:
                     parameter.requires_grad_(False)
                     break
-    logger.info("params after freezing:\n"+json.dumps({n: p.numel() for n, p in model.named_parameters() if p.requires_grad}, indent=2))
+    # logger.info("params after freezing:\n"+json.dumps({n: p.numel() for n, p in model.named_parameters() if p.requires_grad}, indent=2))
+    logger.info("params num after freezing:"+str(len(model.named_parameters())))
 
     # 使用Jittor的优化器
     optimizer = jt.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
@@ -216,9 +217,7 @@ def main(args):
         sampler_train = RandomSampler(dataset_train)
 
     if not args.eval:
-        batch_sampler_train = BatchSampler(sampler_train, args.batch_size, drop_last=True)
-        data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
-                                    collate_fn=utils.collate_fn, num_workers=args.num_workers)
+        data_loader_train = DataLoader(dataset_train, sampler=sampler_train, batch_size=args.batch_size, drop_last=True, collate_fn=utils.collate_fn, num_workers=args.num_workers)
 
     data_loader_val = DataLoader(dataset_val, batch_size=4, sampler=sampler_val,
                                  drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
@@ -274,7 +273,7 @@ def main(args):
         logger.info("Ignore keys: {}".format(json.dumps(ignorelist, indent=2)))
         _tmp_st = OrderedDict({k:v for k, v in utils.clean_state_dict(checkpoint).items() if check_keep(k, _ignorekeywordlist)})
 
-        _load_output = model_without_ddp.load_state_dict(_tmp_st, strict=False)
+        _load_output = model_without_ddp.load_state_dict(_tmp_st)
         logger.info(str(_load_output))
 
     if args.eval:

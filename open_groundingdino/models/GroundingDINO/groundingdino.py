@@ -112,8 +112,8 @@ class GroundingDINO(nn.Module):
         self.bert = BertModelWarper(bert_model=self.bert)
 
         self.feat_map = nn.Linear(self.bert.config.hidden_size, self.hidden_dim, bias=True)
-        nn.init.constant_(self.feat_map.bias.data, 0)
-        nn.init.xavier_uniform_(self.feat_map.weight.data)
+        nn.init.constant_(self.feat_map.bias, 0)
+        nn.init.xavier_uniform_(self.feat_map.weight)
         # freeze
 
         # special tokens
@@ -127,7 +127,7 @@ class GroundingDINO(nn.Module):
                 in_channels = backbone.num_channels[_]
                 input_proj_list.append(
                     nn.Sequential(
-                        nn.Conv2d(in_channels, hidden_dim, kernel_size=1),
+                        nn.Conv(in_channels, hidden_dim, kernel_size=1),
                         nn.GroupNorm(32, hidden_dim),
                     )
                 )
@@ -139,10 +139,10 @@ class GroundingDINO(nn.Module):
                     )
                 )
                 in_channels = hidden_dim
-            self.input_proj = nn.ModuleList(input_proj_list)
+            self.input_proj = nn.Sequential(input_proj_list)
         else:
             assert two_stage_type == "no", "two_stage_type should be no if num_feature_levels=1 !!!"
-            self.input_proj = nn.ModuleList(
+            self.input_proj = nn.Sequential(
                 [
                     nn.Sequential(
                         nn.Conv(backbone.num_channels[-1], hidden_dim, kernel_size=1),
@@ -164,8 +164,8 @@ class GroundingDINO(nn.Module):
         _class_embed = ContrastiveEmbed()
 
         _bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
-        nn.init.constant_(_bbox_embed.layers[-1].weight.data, 0)
-        nn.init.constant_(_bbox_embed.layers[-1].bias.data, 0)
+        nn.init.constant_(_bbox_embed.layers[-1].weight, 0)
+        nn.init.constant_(_bbox_embed.layers[-1].bias, 0)
 
         if dec_pred_bbox_embed_share:
             box_embed_layerlist = [_bbox_embed for i in range(transformer.num_decoder_layers)]
@@ -174,8 +174,8 @@ class GroundingDINO(nn.Module):
                 copy.deepcopy(_bbox_embed) for i in range(transformer.num_decoder_layers)
             ]
         class_embed_layerlist = [_class_embed for i in range(transformer.num_decoder_layers)]
-        self.bbox_embed = nn.ModuleList(box_embed_layerlist)
-        self.class_embed = nn.ModuleList(class_embed_layerlist)
+        self.bbox_embed = nn.Sequential(box_embed_layerlist)
+        self.class_embed = nn.Sequential(class_embed_layerlist)
         self.transformer.decoder.bbox_embed = self.bbox_embed
         self.transformer.decoder.class_embed = self.class_embed
 
@@ -261,7 +261,7 @@ class GroundingDINO(nn.Module):
 
         bert_output = self.bert(**tokenized_for_encoder)  # bs, 195, 768
 
-        encoded_text = self.feat_map(bert_output["last_hidden_state"])  # bs, 195, d_model
+        encoded_text = self.feat_map(jt.array(bert_output["last_hidden_state"].detach().numpy()))  # bs, 195, d_model; use detach to stop grad broadcast; may by wrong
         text_token_mask = tokenized.attention_mask.bool()  # bs, 195
         # text_token_mask: True for nomask, False for mask
         # text_self_attention_masks: True for nomask, False for mask
@@ -291,6 +291,8 @@ class GroundingDINO(nn.Module):
         for l, feat in enumerate(features):
             assert isinstance(feat, NestedTensor)
             src, mask = feat.decompose()
+            if not isinstance(src, jt.Var):
+                src = jt.array(src)
             srcs.append(self.input_proj[l](src))
             masks.append(mask)
             assert mask is not None
@@ -298,11 +300,11 @@ class GroundingDINO(nn.Module):
             _len_srcs = len(srcs)
             for l in range(_len_srcs, self.num_feature_levels):
                 if l == _len_srcs:
-                    src = self.input_proj[l](features[-1].tensors)
+                    src = self.input_proj[l](jt.array(features[-1].tensors))
                 else:
                     src = self.input_proj[l](srcs[-1])
                 m = samples.mask
-                mask = nn.interpolate(m[None].float(), size=src.shape[-2:]).bool()[0]
+                mask = nn.interpolate(jt.array(m[None], dtype=jt.float32), size=src.shape[-2:]).bool()[0]
                 pos_l = jt.type_as(self.backbone[1](NestedTensor(src, mask)), src)
                 srcs.append(src)
                 masks.append(mask)

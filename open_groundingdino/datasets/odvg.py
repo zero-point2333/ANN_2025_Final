@@ -1,16 +1,16 @@
-from torchvision.datasets.vision import VisionDataset
+from jittor.dataset import Dataset
 import os.path
 from typing import Callable, Optional
 import json
 from PIL import Image
-import torch
+import jittor as jt
 import random
 import os, sys
 sys.path.append(os.path.dirname(sys.path[0]))
 
 import datasets.transforms as T
 
-class ODVGDataset(VisionDataset):
+class ODVGDataset(Dataset):
     """
     Args:
         root (string): Root directory where images are downloaded to.
@@ -36,6 +36,7 @@ class ODVGDataset(VisionDataset):
     ) -> None:
         super().__init__(root, transforms, transform, target_transform)
         self.root = root
+        self.transforms = transforms
         self.dataset_mode = "OD" if label_map_anno else "VG"
         self.max_labels = max_labels
         if self.dataset_mode == "OD":
@@ -50,7 +51,7 @@ class ODVGDataset(VisionDataset):
 
     def _load_metas(self, anno):
         with  open(anno, 'r')as f:
-            self.metas = [json.loads(line) for line in f]
+            self.metas = [json.loads(line) for line in f] # 1-based, remind to change to 0-based
 
     def get_dataset_info(self):
         print(f"  == total images: {len(self)}")
@@ -72,7 +73,7 @@ class ODVGDataset(VisionDataset):
             # generate vg_labels
             # pos bbox labels
             ori_classes = [str(obj["label"]) for obj in instances]
-            pos_labels = set(ori_classes)
+            pos_labels = set([str(int(i) - 1) for i in ori_classes])
             # neg bbox labels
             neg_labels = list(self.label_index.difference(pos_labels))
 
@@ -90,9 +91,9 @@ class ODVGDataset(VisionDataset):
             caption_dict = {item:index for index, item in enumerate(caption_list)}
 
             caption = ' . '.join(caption_list) + ' .'
-            classes = [caption_dict[self.label_map[str(obj["label"])]] for obj in instances]
-            boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
-            classes = torch.tensor(classes, dtype=torch.int64)
+            classes = [caption_dict[self.label_map[str(obj["label"] - 1)]] for obj in instances]
+            boxes = jt.array(boxes, dtype=jt.float32).reshape(-1, 4)
+            classes = jt.array(classes, dtype=jt.int64)
         elif self.dataset_mode == "VG":
             anno = meta["grounding"]
             instances = [obj for obj in anno["regions"]]
@@ -107,11 +108,11 @@ class ODVGDataset(VisionDataset):
                 label_map[uni_caption_list[idx]] = idx
             classes = [label_map[cap] for cap in caption_list]
             caption = ' . '.join(uni_caption_list) + ' .'
-            boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
-            classes = torch.tensor(classes, dtype=torch.int64)
+            boxes = jt.array(boxes, dtype=jt.float32).reshape(-1, 4)
+            classes = jt.array(classes, dtype=jt.int64)
             caption_list = uni_caption_list
         target = {}
-        target["size"] = torch.as_tensor([int(h), int(w)])
+        target["size"] = jt.array([int(h), int(w)])
         target["cap_list"] = caption_list
         target["caption"] = caption
         target["boxes"] = boxes

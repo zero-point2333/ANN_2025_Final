@@ -8,19 +8,14 @@ if __name__=="__main__":
     # for debug only
     import os, sys
     sys.path.append(os.path.dirname(sys.path[0]))
-from torchvision.datasets.vision import VisionDataset
+from jittor.dataset import Dataset
 
-import json
-from pathlib import Path
+import jittor as jt
 import random
 import os
-from typing import Any, Callable, List, Optional, Tuple
 
 from PIL import Image
 
-import torch
-import torch.utils.data
-import torchvision
 from pycocotools import mask as coco_mask
 
 from datasets.data_util import preparing_dataset
@@ -37,7 +32,7 @@ class label2compat():
 
     def __call__(self, target, img=None):
         labels = target['labels']
-        res = torch.zeros(labels.shape, dtype=labels.dtype)
+        res = jt.zeros(labels.shape, dtype=labels.dtype)
         for idx, item in enumerate(labels):
             res[idx] = self.category_map[item.item()] - 1
         target['label_compat'] = res
@@ -58,13 +53,13 @@ class label_compat2onehot():
         labels = target['label_compat']
         place_dict = {k:0 for k in range(self.num_class)}
         if self.num_output_objs == 1:
-            res = torch.zeros(self.num_class)
+            res = jt.zeros(self.num_class)
             for i in labels:
                 itm = i.item()
                 res[itm] = 1.0
         else:
             # compat with baseline
-            res = torch.zeros(self.num_class, self.num_output_objs)
+            res = jt.zeros(self.num_class, self.num_output_objs)
             for i in labels:
                 itm = i.item()
                 res[itm][place_dict[itm]] = 1.0
@@ -83,7 +78,8 @@ class box_label_catter():
     def __call__(self, target, img=None):
         labels = target['label_compat']
         boxes = target['boxes']
-        box_label = torch.cat((boxes, labels.unsqueeze(-1)), 1)
+        assert isinstance(labels, jt.Var)
+        box_label = jt.concat((boxes, labels.unsqueeze(-1)), 1)
         target['box_label'] = box_label
         if img is not None:
             return target, img
@@ -121,20 +117,29 @@ class RandomSelectBoxlabels():
         self.prob_stop_sign = prob_stop_sign
         
 
-    def sample_for_pred_first_item(self, box_label: torch.FloatTensor):
-        box_label_known = torch.Tensor(0,5)
+    def sample_for_pred_first_item(self, box_label: jt.Var):
+        print(box_label.dtype())
+        assert isinstance(box_label, jt.Var) and box_label.dtype() == "float32"
+        raise AssertionError
+        box_label_known = jt.array(0, 5)
         box_label_unknown = box_label
         return box_label_known, box_label_unknown
 
-    def sample_for_pred_random_item(self, box_label: torch.FloatTensor):
+    def sample_for_pred_random_item(self, box_label: jt.Var):
+        print(box_label.dtype())
+        assert isinstance(box_label, jt.Var) and box_label.dtype() == "float32"
+        raise AssertionError
         n_select = int(random.random() * box_label.shape[0])
-        box_label = box_label[torch.randperm(box_label.shape[0])]
+        box_label = box_label[jt.randperm(box_label.shape[0])]
         box_label_known = box_label[:n_select]
         box_label_unknown = box_label[n_select:]
         return box_label_known, box_label_unknown
 
-    def sample_for_pred_last_item(self, box_label: torch.FloatTensor):
-        box_label_perm = box_label[torch.randperm(box_label.shape[0])]
+    def sample_for_pred_last_item(self, box_label: jt.Var):
+        print(box_label.dtype())
+        assert isinstance(box_label, jt.Var) and box_label.dtype() == "float32"
+        raise AssertionError
+        box_label_perm = box_label[jt.randperm(box_label.shape[0])]
         known_label_list = []
         box_label_known = []
         box_label_unknown = []
@@ -146,12 +151,15 @@ class RandomSelectBoxlabels():
                 # first item
                 box_label_unknown.append(item)
                 known_label_list.append(label_i)
-        box_label_known = torch.stack(box_label_known) if len(box_label_known) > 0 else torch.Tensor(0,5)
-        box_label_unknown = torch.stack(box_label_unknown) if len(box_label_unknown) > 0 else torch.Tensor(0,5)
+        box_label_known = jt.stack(box_label_known) if len(box_label_known) > 0 else jt.array(0, 5)
+        box_label_unknown = jt.stack(box_label_unknown) if len(box_label_unknown) > 0 else jt.array(0, 5)
         return box_label_known, box_label_unknown
 
-    def sample_for_pred_stop_sign(self, box_label: torch.FloatTensor):
-        box_label_unknown = torch.Tensor(0,5)
+    def sample_for_pred_stop_sign(self, box_label: jt.Var):
+        print(box_label.dtype())
+        assert isinstance(box_label, jt.Var) and box_label.dtype() == "float32"
+        raise AssertionError
+        box_label_unknown = jt.Var(0, 5)
         box_label_known = box_label
         return box_label_known, box_label_unknown
 
@@ -184,7 +192,7 @@ class RandomDrop():
     def __call__(self, target, img=None):
         known_box = target['box_label_known']
         num_known_box = known_box.size(0)
-        idxs = torch.rand(num_known_box)
+        idxs = jt.rand(num_known_box)
         # indices = torch.randperm(num_known_box)[:int((1-self).p*num_known_box + 0.5 + random.random())]
         target['box_label_known'] = known_box[idxs > self.p]
         return target, img
@@ -198,14 +206,13 @@ class BboxPertuber():
         self.idx = 0
 
     def generate_pertube_samples(self):
-        import torch
-        samples = (torch.rand(self.generate_samples, 5) - 0.5) * 2 * self.max_ratio
+        samples = (jt.rand(self.generate_samples, 5) - 0.5) * 2 * self.max_ratio
         return samples
 
     def __call__(self, target, img):
         known_box = target['box_label_known'] # Tensor(K,5), K known bbox
         K = known_box.shape[0]
-        known_box_pertube = torch.zeros(K, 6) # 4:bbox, 1:prob, 1:label
+        known_box_pertube = jt.zeros((K, 6)) # 4:bbox, 1:prob, 1:label
         if K == 0:
             pass
         else:
@@ -213,9 +220,10 @@ class BboxPertuber():
                 self.idx = 0
             delta = self.samples[self.idx: self.idx + K, :]
             known_box_pertube[:, :4] = known_box[:, :4] + delta[:, :4]
-            iou = (torch.diag(box_iou(box_cxcywh_to_xyxy(known_box[:, :4]), box_cxcywh_to_xyxy(known_box_pertube[:, :4]))[0])) * (1 + delta[:, -1])
-            known_box_pertube[:, 4].copy_(iou)
-            known_box_pertube[:, -1].copy_(known_box[:, -1])
+            iou = (jt.diag(box_iou(box_cxcywh_to_xyxy(known_box[:, :4]), box_cxcywh_to_xyxy(known_box_pertube[:, :4]))[0])) * (1 + delta[:, -1])
+            assert isinstance(known_box_pertube, jt.Var)
+            known_box_pertube[:, 4] = jt.copy(iou)
+            known_box_pertube[:, -1] = jt.copy(known_box[:, -1])
 
         target['box_label_known_pertube'] = known_box_pertube
         return target, img
@@ -230,15 +238,15 @@ class RandomCutout():
         known_box = target['box_label_known_pertube']       # Kk, 6
         Ku = unknown_box.size(0)
 
-        known_box_add = torch.zeros(Ku, 6) # Ku, 6
+        known_box_add = jt.zeros(Ku, 6) # Ku, 6
         known_box_add[:, :5] = unknown_box
-        known_box_add[:, 5].uniform_(0.5, 1) 
+        jt.init.uniform_(known_box_add[:, 5], 0.5, 1) 
         
 
-        known_box_add[:, :2] += known_box_add[:, 2:4] * (torch.rand(Ku, 2) - 0.5) / 2
+        known_box_add[:, :2] += known_box_add[:, 2:4] * (jt.rand(Ku, 2) - 0.5) / 2
         known_box_add[:, 2:4] /= 2
 
-        target['box_label_known_pertube'] = torch.cat((known_box, known_box_add))
+        target['box_label_known_pertube'] = jt.concat((known_box, known_box_add))
         return target, img
 
 
@@ -256,7 +264,7 @@ class RandomSelectBoxes():
         for idx, item in enumerate(boxes):
             label = labels[idx].item()
             boxs_list[label].append(item)
-        boxs_list_tensor = [torch.stack(i) if len(i) > 0 else torch.Tensor(0,4) for i in boxs_list]
+        boxs_list_tensor = [jt.stack(i) if len(i) > 0 else jt.array(0,4) for i in boxs_list]
 
         # random selection
         box_known = []
@@ -265,7 +273,7 @@ class RandomSelectBoxes():
             ncnt = item.shape[0]
             nselect = int(random.random() * ncnt) # close in both sides, much faster than random.randint
 
-            item = item[torch.randperm(ncnt)]
+            item = item[jt.randperm(ncnt)]
             # random.shuffle(item)
             box_known.append(item[:nselect])
             box_unknown.append(item[nselect:])
@@ -282,7 +290,7 @@ def label2onehot(label, num_classes):
     """
     label: Tensor(K)
     """
-    res = torch.zeros(num_classes)
+    res = jt.zeros(num_classes)
     for i in label:
         itm = int(i.item())
         res[itm] = 1.0
@@ -298,7 +306,7 @@ class MaskCrop():
         h,w = img.shape[1:] # h,w
         # imgsize = target['orig_size'] # h,w
 
-        scale = torch.Tensor([w, h, w, h])
+        scale = jt.array([w, h, w, h])
 
         # _cnt = 0
         for boxes in known_box:
@@ -306,7 +314,8 @@ class MaskCrop():
                 continue
             box_xyxy = box_cxcywh_to_xyxy(boxes) * scale
             for box in box_xyxy:
-                x1, y1, x2, y2 = [int(i) for i in box.tolist()]
+                assert isinstance(box, jt.Var)
+                x1, y1, x2, y2 = [int(i) for i in jt.tolist(box)]
                 img[:, y1:y2, x1:x2] = 0
                 # _cnt += 1
         # print("_cnt:", _cnt)
@@ -324,7 +333,7 @@ dataset_hook_register = {
 }
 
 
-class CocoDetection(torchvision.datasets.CocoDetection):
+class CocoDetection(Dataset):
     def __init__(self, img_folder, ann_file, transforms, return_masks, aux_target_hacks=None):
         super(CocoDetection, self).__init__(img_folder, ann_file)
         self._transforms = transforms
@@ -385,13 +394,13 @@ def convert_coco_poly_to_mask(segmentations, height, width):
         mask = coco_mask.decode(rles)
         if len(mask.shape) < 3:
             mask = mask[..., None]
-        mask = torch.as_tensor(mask, dtype=torch.uint8)
+        mask = jt.array(mask, dtype=jt.uint8)
         mask = mask.any(dim=2)
         masks.append(mask)
     if masks:
-        masks = torch.stack(masks, dim=0)
+        masks = jt.stack(masks, dim=0)
     else:
-        masks = torch.zeros((0, height, width), dtype=torch.uint8)
+        masks = jt.zeros((0, height, width), dtype=jt.uint8)
     return masks
 
 
@@ -403,7 +412,7 @@ class ConvertCocoPolysToMask(object):
         w, h = image.size
 
         image_id = target["image_id"]
-        image_id = torch.tensor([image_id])
+        image_id = jt.array([image_id])
 
         anno = target["annotations"]
 
@@ -411,13 +420,14 @@ class ConvertCocoPolysToMask(object):
 
         boxes = [obj["bbox"] for obj in anno]
         # guard against no boxes via resizing
-        boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
+        boxes = jt.array(boxes, dtype=jt.float32).reshape(-1, 4)
+        assert isinstance(boxes, jt.Var)
         boxes[:, 2:] += boxes[:, :2]
-        boxes[:, 0::2].clamp_(min=0, max=w)
-        boxes[:, 1::2].clamp_(min=0, max=h)
+        boxes[:, 0::2] = jt.clamp(boxes[:, 0::2], min_v=0, max_v=w)
+        boxes[:, 1::2] = jt.clamp(boxes[:, 1::2], min_v=0, max_v=h)
 
         classes = [obj["category_id"] for obj in anno]
-        classes = torch.tensor(classes, dtype=torch.int64)
+        classes = jt.array(classes, dtype=jt.int64)
 
         if self.return_masks:
             segmentations = [obj["segmentation"] for obj in anno]
@@ -426,9 +436,10 @@ class ConvertCocoPolysToMask(object):
         keypoints = None
         if anno and "keypoints" in anno[0]:
             keypoints = [obj["keypoints"] for obj in anno]
-            keypoints = torch.as_tensor(keypoints, dtype=torch.float32)
+            keypoints = jt.array(keypoints, dtype=jt.float32)
             num_keypoints = keypoints.shape[0]
             if num_keypoints:
+                assert isinstance(keypoints, jt.Var)
                 keypoints = keypoints.view(num_keypoints, -1, 3)
 
         keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
@@ -449,13 +460,13 @@ class ConvertCocoPolysToMask(object):
             target["keypoints"] = keypoints
 
         # for conversion to coco api
-        area = torch.tensor([obj["area"] for obj in anno])
-        iscrowd = torch.tensor([obj["iscrowd"] if "iscrowd" in obj else 0 for obj in anno])
+        area = jt.Var([obj["area"] for obj in anno])
+        iscrowd = jt.Var([obj["iscrowd"] if "iscrowd" in obj else 0 for obj in anno])
         target["area"] = area[keep]
         target["iscrowd"] = iscrowd[keep]
 
-        target["orig_size"] = torch.as_tensor([int(h), int(w)])
-        target["size"] = torch.as_tensor([int(h), int(w)])
+        target["orig_size"] = jt.Var([int(h), int(w)])
+        target["size"] = jt.Var([int(h), int(w)])
 
         return image, target
 

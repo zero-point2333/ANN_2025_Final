@@ -23,7 +23,7 @@ from jittor import nn
 
 from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
 
-from GroundingDINO.groundingdino.util.utils import cdist
+from util.utils import cdist
 
 
 class HungarianMatcher(nn.Module):

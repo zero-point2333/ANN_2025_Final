@@ -5,7 +5,7 @@ file_path = 'tools/coco2odvg.py'
 
 # Define the new values according to the dataset
 new_id_map = '{0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7}'# 7 classes of AquariumDataset
-new_ori_map = '{"1": "fish", "2": "jellyfish", "3": "penguins", "4": "sharks", "5": "puffins", "6":"stingrays", "7": "starfish"}'
+new_ori_map = '{"1": "fish", "2": "jellyfish", "3": "penguin", "4": "puffin", "5": "shark", "6":"starfish", "7": "stingray"}'
 
 # Read the content of the file
 with open(file_path, 'r') as file:

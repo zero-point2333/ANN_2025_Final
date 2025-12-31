@@ -298,7 +298,7 @@ def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_token
     # special_tokens_mask: bs, num_token. 1 for special tokens. 0 for normal tokens
     special_tokens_mask = jt.zeros((bs, num_token)).bool()
     for special_token in special_tokens_list:
-        special_tokens_mask |= input_ids == special_token
+        special_tokens_mask |= (input_ids == special_token).numpy() # numpy can store bool
 
     # idxs: each row is a list of indices of special tokens
     idxs = jt.nonzero(special_tokens_mask)

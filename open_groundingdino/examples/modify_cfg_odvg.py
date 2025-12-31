@@ -1,7 +1,7 @@
 import re
 
 def modify_file(file_path):
-    label_list_content = 'label_list = ["fish","jellyfish","penguins","sharks","puffins","stingrays","starfish"]\n'
+    label_list_content = 'label_list = ["fish","jellyfish","penguin","puffin","shark","starfish","stingray"]\n'
 
     # Read the entire content of the file
     with open(file_path, 'r') as file:

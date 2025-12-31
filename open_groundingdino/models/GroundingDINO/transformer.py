@@ -229,7 +229,11 @@ class Transformer(nn.Module):
         assert isinstance(text_dict, dict)
         for key in ("encoded_text", "text_token_mask", "position_ids", "text_self_attention_masks"):
             log_text(f"text_dict[{key}] type={type(text_dict.get(key))}")
-            assert isinstance(text_dict.get(key), jt.Var)
+            if (text_dict.get(key) is not None) and (not isinstance(text_dict.get(key), jt.Var)):
+                if isinstance(text_dict[key], np.ndarray):
+                    text_dict[key] = jt.array(text_dict[key])
+                else:
+                    text_dict[key] = jt.array(text_dict[key].numpy())
         log_text(
             f"Transformer.execute: levels={len(srcs)} two_stage={self.two_stage_type} num_queries={self.num_queries}",
         )
