@@ -60,10 +60,11 @@ def train_one_epoch(model, criterion,
             print(loss_dict_reduced)
             sys.exit(1)
 
+        assert isinstance(optimizer, jt.optim.AdamW)
         optimizer.zero_grad()
         optimizer.backward(losses)
-        if max_norm > 0 and hasattr(nn, "utils") and hasattr(nn.utils, "clip_grad_norm_"):
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+        # if max_norm > 0 and hasattr(nn, "utils") and hasattr(nn.utils, "clip_grad_norm_"):
+        #     nn.utils.clip_grad_norm_(model.parameters(), max_norm)
         optimizer.step()
 
         if args.onecyclelr:

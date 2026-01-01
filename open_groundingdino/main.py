@@ -9,32 +9,15 @@ from pathlib import Path
 import os, sys
 import numpy as np
 
-# =======================
-# CPU-only hard switches
-# (MUST be set before importing groundingdino.util.inference which imports jittor)
-# =======================
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
-os.environ["HF_DATASETS_OFFLINE"] = "1"
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-# 1) Tell Jittor "do NOT use cuda" via flag-style env var
-os.environ["use_cuda"] = "0"
-# 2) Prevent CUDA toolchain auto-enable / auto-download
-os.environ["nvcc_path"] = ""
-# 3) Hide GPUs from CUDA runtime (use empty string; avoid -1 which can be quirky)
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
-# 4) Avoid multiprocess compiler pool (sandbox blocks semaphores)
-os.environ["DISABLE_MULTIPROCESSING"] = "1"
-# 5) Point Jittor at the right pythonX.Y-config so it won't try to compile against system python
-exe_real = os.path.realpath(sys.executable)
-py_config = os.path.join(os.path.dirname(exe_real), f"python{sys.version_info.major}.{sys.version_info.minor}-config")
-os.environ.setdefault("python_config_path", py_config)
-# Enable verbose NaN/Inf diagnostics
-os.environ.setdefault("GROUNDINGDINO_DEBUG_NAN", "1")
+# exe_real = os.path.realpath(sys.executable)
+# py_config = os.path.join(os.path.dirname(exe_real), f"python{sys.version_info.major}.{sys.version_info.minor}-config")
+# os.environ.setdefault("python_config_path", py_config)
+# # Enable verbose NaN/Inf diagnostics
+# os.environ.setdefault("GROUNDINGDINO_DEBUG_NAN", "1")
 
 import jittor as jt
 from jittor import nn
-from jittor.dataset import DataLoader, SequentialSampler, RandomSampler, BatchSampler
+from jittor.dataset import DataLoader, SequentialSampler, RandomSampler
 
 from util.get_param_dicts import get_param_dict
 from util.logger import setup_logger
@@ -75,7 +58,7 @@ def get_args_parser():
                         help='add some notes to the experiment')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
-    parser.add_argument('--seed', default=42, type=int)
+    parser.add_argument('--seed', default=19260817, type=int)
     parser.add_argument('--resume', default='', help='resume from checkpoint')
     parser.add_argument('--pretrain_model_path', help='load from other checkpoint')
     parser.add_argument('--finetune_ignore', type=str, nargs='+')
@@ -166,6 +149,10 @@ def main(args):
     jt.set_global_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
+    import torch
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic=True
 
     logger.debug("build model ... ...")
     model, criterion, postprocessors = build_model_main(args)
@@ -296,6 +283,7 @@ def main(args):
     best_map_holder = BestMetricHolder(use_ema=False)
 
     for epoch in range(args.start_epoch, args.epochs):
+        print(f"Epoch {epoch} start")
         epoch_start_time = time.time()
         if args.distributed and not args.eval:
             sampler_train.set_epoch(epoch)
@@ -304,6 +292,8 @@ def main(args):
             model, criterion, data_loader_train, optimizer, epoch,
             args.clip_max_norm, wo_class_error=wo_class_error, lr_scheduler=lr_scheduler, 
             args=args, logger=(logger if args.save_log else None))
+        
+        print("Training Done")
         
         if not args.onecyclelr:
             lr_scheduler.step()
@@ -325,6 +315,7 @@ def main(args):
                 utils.save_on_master(weights, checkpoint_path)
                 
         # eval
+        print("Eval Start")
         test_stats, coco_evaluator = evaluate(
             model, criterion, postprocessors, data_loader_val, base_ds, args.output_dir,
             wo_class_error=wo_class_error, args=args, logger=(logger if args.save_log else None)

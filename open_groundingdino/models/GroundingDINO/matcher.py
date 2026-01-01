@@ -253,6 +253,18 @@ class SimpleMinsumMatcher(nn.Module):
         
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
         C = C.view(bs, num_queries, -1)
+        # ================= [修改] 修复 Cost 矩阵处理 =================
+        # 不要把 NaN/Inf 设为 0，应该设为一个巨大的代价，让 Matcher 避开它们
+        # 0.0 代表完美匹配，1e6 代表极差匹配
+        
+        # 处理 NaN
+        if jt.isnan(C).any():
+            C = jt.where(jt.isnan(C), jt.full_like(C, 1e6), C)
+            
+        # 处理 Inf
+        if jt.isinf(C).any():
+             C = jt.where(jt.isinf(C), jt.full_like(C, 1e6), C)
+        # ==========================================================
         sizes = [int(b.shape[0]) for b in tgt_bbox_list]
         if bs == 1:
             total = sizes[0]

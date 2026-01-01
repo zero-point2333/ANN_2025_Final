@@ -24,6 +24,7 @@ import math
 import jittor as jt
 from jittor import nn
 
+from util.debug_tools import log_text
 from util.misc import NestedTensor
 
 
@@ -96,6 +97,7 @@ class PositionEmbeddingSineHW(nn.Module):
         self.scale = scale
 
     def execute(self, tensor_list: NestedTensor):
+        log_text("Pos Embed Sine HW executing")
         x = tensor_list.tensors
         mask = tensor_list.mask
         assert mask is not None
@@ -149,6 +151,7 @@ class PositionEmbeddingLearned(nn.Module):
         nn.init.uniform_(self.col_embed.weight)
 
     def execute(self, tensor_list: NestedTensor):
+        log_text("Pos Embed Learned executing")
         x = tensor_list.tensors
         h, w = x.shape[-2:]
         i = jt.arange(w)
@@ -174,6 +177,7 @@ def build_position_encoding(args):
     N_steps = args.hidden_dim // 2
     if args.position_embedding in ("v2", "sine"):
         # TODO find a better way of exposing other arguments
+        log_text("build sine hw")
         position_embedding = PositionEmbeddingSineHW(
             N_steps,
             temperatureH=args.pe_temperatureH,
@@ -181,6 +185,7 @@ def build_position_encoding(args):
             normalize=True,
         )
     elif args.position_embedding in ("v3", "learned"):
+        log_text("build v3 learned")
         position_embedding = PositionEmbeddingLearned(N_steps)
     else:
         raise ValueError(f"not supported {args.position_embedding}")

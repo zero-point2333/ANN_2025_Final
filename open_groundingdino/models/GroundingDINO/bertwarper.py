@@ -219,6 +219,7 @@ class BertModelWarper(nn.Module):
         if not return_dict:
             return (sequence_output, pooled_output_pt) + encoder_outputs[1:]
 
+        log_text("torch bert model done!")
         # modify: 这里得到输入应该是pytorch的tensor才对
         return BaseModelOutputWithPoolingAndCrossAttentions(
             last_hidden_state=sequence_output,

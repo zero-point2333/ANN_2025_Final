@@ -220,6 +220,7 @@ class Transformer(nn.Module):
             - tgt: [bs, num_dn, d_model]. None in infer
 
         """
+        print("Transformer Start!")
         for feat__ in srcs:
             assert isinstance(feat__, jt.Var)
         for pos_embed__ in pos_embeds:
@@ -711,7 +712,7 @@ class TransformerDecoder(nn.Module):
             log_tensor("decoder.init.memory_text", memory_text)
 
         for layer_id, layer in enumerate(self.layers):
-
+            print(f"Start Decoder Layer {layer_id}")
             if reference_points.shape[-1] == 4:
                 reference_points_input: jt.Var = (
                     reference_points[:, :, None]
@@ -754,7 +755,7 @@ class TransformerDecoder(nn.Module):
                 cross_attn_mask=memory_mask,
             )
             log_tensor(f"decoder.layer{layer_id}.output", output)
-            if output.isnan().any() | output.isinf().any():
+            if jt.any(jt.isnan(output)) | jt.any(jt.isinf(output)):
                 print(f"output layer_id {layer_id} is nan")
                 try:
                     num_nan = output.isnan().sum().item()
@@ -767,6 +768,7 @@ class TransformerDecoder(nn.Module):
 
             # iter update
             if self.bbox_embed is not None:
+                print("bbox start")
                 assert isinstance(self.bbox_embed, nn.Sequential)
                 reference_before_sigmoid = inverse_sigmoid(reference_points)
                 delta_unsig: jt.Var = self.bbox_embed[layer_id](output)
@@ -952,6 +954,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
         self_attn_mask: Optional[jt.Var] = None,  # mask used for self-attention
         cross_attn_mask: Optional[jt.Var] = None,  # mask used for cross-attention
     ) -> jt.Var:
+        print("DeformTransDecLayer Start!")
         """
         Input:
             - tgt/tgt_query_pos: nq, bs, d_model
@@ -991,7 +994,10 @@ class DeformableTransformerDecoderLayer(nn.Module):
 
         # ffn
         tgt = self.forward_ffn(tgt)
+        log_tensor("tgt", tgt)
+        log_tensor("tgt is nan", jt.any(jt.isnan(tgt)))
 
+        print("DeformTransDecLayer Done!")
         return tgt
 
 

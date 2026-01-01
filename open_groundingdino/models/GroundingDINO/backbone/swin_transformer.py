@@ -672,6 +672,7 @@ class SwinTransformer(nn.Module):
         return tuple(outs)
 
     def execute(self, tensor_list: NestedTensor):
+        log_text("Swin T Executing")
         x = tensor_list.tensors
 
         """Forward function."""

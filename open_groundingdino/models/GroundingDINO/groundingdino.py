@@ -268,11 +268,20 @@ class GroundingDINO(nn.Module):
             tokenized_for_encoder = tokenized
 
         bert_output = self.bert(**tokenized_for_encoder)  # bs, 195, 768
+        print("Bert Done!")
 
-        encoded_text = self.feat_map(jt.array(bert_output["last_hidden_state"].detach().numpy()))  # bs, 195, d_model; use detach to stop grad broadcast; may by wrong
+        last_hidden_state = bert_output["last_hidden_state"]
+        if isinstance(last_hidden_state, jt.Var):
+            encoded_text = self.feat_map(last_hidden_state)
+        else:
+            if hasattr(last_hidden_state, "detach") and hasattr(last_hidden_state, "cpu") and hasattr(last_hidden_state, "numpy"):
+                last_hidden_state = last_hidden_state.detach().cpu().numpy()
+            encoded_text = self.feat_map(jt.array(last_hidden_state))
         text_token_mask = tokenized.attention_mask.bool()  # bs, 195
         # text_token_mask: True for nomask, False for mask
         # text_self_attention_masks: True for nomask, False for mask
+        
+        print("Feat Map Done!")
 
         if encoded_text.shape[1] > self.max_text_len:
             encoded_text = encoded_text[:, : self.max_text_len, :]
@@ -317,12 +326,15 @@ class GroundingDINO(nn.Module):
                 srcs.append(src)
                 masks.append(mask)
                 poss.append(pos_l)
+            
+        print("Backbone Done!")
 
         input_query_bbox = input_query_label = attn_mask = dn_meta = None
         hs, reference, hs_enc, ref_enc, init_box_proposal = self.transformer(
             srcs, masks, input_query_bbox, poss, input_query_label, attn_mask, text_dict
         )
 
+        print("Transformer Done!")
         
         # deformable-detr-like anchor update
         outputs_coord_list = []
@@ -348,11 +360,22 @@ class GroundingDINO(nn.Module):
 
         # Used to calculate losses
         bs, len_td = text_dict['text_token_mask'].shape
-        out['text_mask'] = jt.zeros(bs, self.max_text_len, dtype=jt.bool)
-        for b in range(bs):
-            for j in range(len_td):
-                if text_dict['text_token_mask'][b][j] == True:
-                    out['text_mask'][b][j] = True
+        # [修改] 使用 concat 替代 setitem
+        if len_td < self.max_text_len:
+            pad_len = self.max_text_len - len_td
+            # 注意: text_token_mask 中 1 是有效，0 是 padding (假设)
+            # 或者 0 是 padding? 根据原代码 zeros 填充，说明 padding 部分是 False/0
+            pad = jt.zeros((bs, pad_len), dtype=text_dict['text_token_mask'].dtype)
+            # 确保类型一致
+            if text_dict['text_token_mask'].dtype != pad.dtype:
+                pad = pad.cast(text_dict['text_token_mask'].dtype)
+            
+            out['text_mask'] = jt.concat([text_dict['text_token_mask'], pad], dim=1)
+        else:
+            out['text_mask'] = text_dict['text_token_mask'][:, :self.max_text_len]
+            
+        # 确保转为 bool
+        out['text_mask'] = out['text_mask'].bool()
 
         # for intermediate outputs
         if self.aux_loss:
@@ -362,6 +385,7 @@ class GroundingDINO(nn.Module):
         if hs_enc is not None:
             # prepare intermediate outputs
             interm_coord = ref_enc[-1]
+            print("Transformer.enc_out_class_embed Start!")
             interm_class = self.transformer.enc_out_class_embed(hs_enc[-1], text_dict)
             out['interm_outputs'] = {'pred_logits': interm_class, 'pred_boxes': interm_coord}
             out['interm_outputs_for_matching_pre'] = {'pred_logits': interm_class, 'pred_boxes': init_box_proposal}
@@ -394,8 +418,40 @@ class GroundingDINO(nn.Module):
 
         # outputs['one_hot'].shape
         # torch.Size([4, 900, 256])
+        
+        # ================= [新增] Jittor 数值保护 =================
+        # 强制截断 logits，防止 Sigmoid 后出现绝对的 0 或 1，导致 Loss 计算 log(0)
+        # 同时防止 inf 传入 Matcher 导致索引越界
+        safe_min = -100.0
+        safe_max = 100.0
+        
+        # 1. 修复主输出
+        if isinstance(out["pred_logits"], jt.Var):
+            out["pred_logits"] = jt.clamp(out["pred_logits"], safe_min, safe_max)
+            # 如果出现 nan，将其置为 0 (背景类)
+            if jt.any(jt.isnan(out["pred_logits"])):
+                out["pred_logits"] = jt.where(
+                    jt.isnan(out["pred_logits"]), 
+                    jt.zeros_like(out["pred_logits"]), 
+                    out["pred_logits"]
+                )
+
+        # 2. 修复辅助输出 (Aux Loss)
+        if "aux_outputs" in out:
+            for aux in out["aux_outputs"]:
+                if "pred_logits" in aux:
+                    aux["pred_logits"] = jt.clamp(aux["pred_logits"], safe_min, safe_max)
+
+        # 3. 修复中间输出 (Two-stage)
+        if "interm_outputs" in out and "pred_logits" in out["interm_outputs"]:
+            out["interm_outputs"]["pred_logits"] = jt.clamp(out["interm_outputs"]["pred_logits"], safe_min, safe_max)
+        
+        if "interm_outputs_for_matching_pre" in out and "pred_logits" in out["interm_outputs_for_matching_pre"]:
+            out["interm_outputs_for_matching_pre"]["pred_logits"] = jt.clamp(out["interm_outputs_for_matching_pre"]["pred_logits"], safe_min, safe_max)
+        # ========================================================
 
         return out
+
     def _set_aux_loss(self, outputs_class, outputs_coord):
         # Build auxiliary outputs without iterating directly over jt.Var.
         aux_outputs = []
@@ -405,6 +461,10 @@ class GroundingDINO(nn.Module):
                 {"pred_logits": outputs_class[i], "pred_boxes": outputs_coord[i]}
             )
         return aux_outputs
+
+
+
+
 class SetCriterion(nn.Module):
     def __init__(self, matcher, weight_dict, focal_alpha,focal_gamma, losses):
         """ Create the criterion.
@@ -445,12 +505,15 @@ class SetCriterion(nn.Module):
         idx = self._get_src_permutation_idx(indices)
         src_boxes = outputs['pred_boxes'][idx]
         target_boxes = jt.concat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+
         # Use elementwise L1 to keep [num_boxes, 4] for downstream slicing.
         loss_bbox = (src_boxes - target_boxes).abs()
         if loss_bbox.ndim == 1:
             loss_bbox = loss_bbox.reshape(1, -1)
+
         losses = {}
         losses['loss_bbox'] = loss_bbox.sum() / num_boxes
+
         src_xyxy = box_ops.box_cxcywh_to_xyxy(src_boxes)
         tgt_xyxy = box_ops.box_cxcywh_to_xyxy(target_boxes)
         if src_xyxy.numel() == 0 or tgt_xyxy.numel() == 0:
@@ -495,12 +558,12 @@ class SetCriterion(nn.Module):
         bs, n, _ = pred_logits.shape
         alpha=self.focal_alpha
         gamma=self.focal_gamma
+        mask_f = None
         if text_mask is not None:
             # ODVG: each sample has different mask
             assert isinstance(text_mask, jt.Var) 
             text_mask = text_mask.repeat(1, pred_logits.size(1)).view(outputs['text_mask'].shape[0],-1,outputs['text_mask'].shape[1]) # not highlighted, but doc says it has
-            pred_logits = pred_logits[text_mask] # use bool index; uncertain
-            new_targets = new_targets[text_mask] # use bool index; uncertain
+            mask_f = text_mask.astype(pred_logits.dtype)
 
         new_targets = new_targets.float()
         p = jt.sigmoid(pred_logits)
@@ -511,6 +574,8 @@ class SetCriterion(nn.Module):
         if alpha >= 0:
             alpha_t = alpha * new_targets + (1 - alpha) * (1 - new_targets)
             loss = alpha_t * loss
+        if mask_f is not None:
+            loss = loss * mask_f
 
         total_num_pos=0
         for batch_indices in indices:
@@ -631,18 +696,25 @@ class SetCriterion(nn.Module):
         # interm_outputs loss
         if 'interm_outputs' in outputs:
             interm_outputs = outputs['interm_outputs']
-            if not hasattr(self, "_debug_interm_logged"):
-                self._debug_interm_logged = True
-                log_text("interm_outputs stats", force=True)
-                log_tensor("interm_outputs.pred_logits", interm_outputs.get("pred_logits"), force=True)
-                log_tensor("interm_outputs.pred_boxes", interm_outputs.get("pred_boxes"), force=True)
             pred_boxes_dbg = interm_outputs.get("pred_boxes")
+            log_text("interm_outputs stats", force=True)
+            log_tensor("interm_outputs.pred_logits", interm_outputs.get("pred_logits"), force=True)
+            log_tensor("interm_outputs.pred_boxes", interm_outputs.get("pred_boxes"), force=True)
             if isinstance(pred_boxes_dbg, jt.Var):
+                log_tensor("pred_boxes_dbg", pred_boxes_dbg)
                 invalid = jt.isnan(pred_boxes_dbg) | jt.isinf(pred_boxes_dbg)
-                if invalid.any().item():
+                log_tensor("invalid for pred_boxes_dbg", invalid)
+                if jt.any(invalid):
                     pred_boxes_dbg = jt.where(invalid, jt.zeros_like(pred_boxes_dbg), pred_boxes_dbg)
                 pred_boxes_dbg = jt.clamp(pred_boxes_dbg, min_v=0.0, max_v=1.0)
                 interm_outputs["pred_boxes"] = pred_boxes_dbg
+            pred_logits_dbg = interm_outputs.get("pred_logits")
+            if isinstance(pred_logits_dbg, jt.Var):
+                invalid = jt.isnan(pred_logits_dbg) | jt.isinf(pred_logits_dbg)
+                if jt.any(invalid):
+                    pred_logits_dbg = jt.where(invalid, jt.zeros_like(pred_logits_dbg), pred_logits_dbg)
+                pred_logits_dbg = jt.clamp(pred_logits_dbg, min_v=-20.0, max_v=20.0)
+                interm_outputs["pred_logits"] = pred_logits_dbg
             indices = []
             pred_logits = interm_outputs['pred_logits']
             pred_boxes = interm_outputs['pred_boxes']
@@ -661,9 +733,18 @@ class SetCriterion(nn.Module):
                     'pred_boxes': pb.unsqueeze(0)
                 }
                 inds = self.matcher(interm_output_single, [targets[j]], label_map_list[j])
+                print("Matcher Done!")
                 indices.extend(inds)
             one_hot_aux = jt.zeros(outputs['pred_logits'].size(),dtype=jt.int64)
-            tgt_ids = [v["labels"].cpu() for v in targets]
+            tgt_ids = []
+            for v in targets:
+                labels = v["labels"]
+                if isinstance(labels, jt.Var):
+                    tgt_ids.append(labels)
+                else:
+                    if hasattr(labels, "detach") and hasattr(labels, "cpu") and hasattr(labels, "numpy"):
+                        labels = labels.detach().cpu().numpy()
+                    tgt_ids.append(jt.array(labels))
             for i in range(len(indices)):
                 tgt_ids[i]=tgt_ids[i][indices[i][1]]
                 one_hot_aux[i,indices[i][0]] = jt.array(label_map_list[i][tgt_ids[i]], dtype=jt.int64)
@@ -856,7 +937,14 @@ def create_positive_map(tokenized, tokens_positive,cat_list,caption):
     """construct a map such that positive_map[i,j] = True iff box i is associated to token j"""
     positive_map = jt.zeros((len(tokens_positive), 256), dtype=jt.float32)
 
-    for j,label in enumerate(tokens_positive):
+    for j, label in enumerate(tokens_positive):
+        if isinstance(label, jt.Var):
+            if label.ndim != 0:
+                label = label.reshape(-1)[0]
+            label = label.numpy().item()
+        elif hasattr(label, "item"):
+            label = label.item()
+        label = int(label)
 
         start_ind = caption.find(cat_list[label])
         end_ind = start_ind + len(cat_list[label]) - 1
@@ -900,4 +988,3 @@ def create_positive_map(tokenized, tokens_positive,cat_list,caption):
         # assert beg_pos is not None and end_pos is not None
         positive_map[j,beg_pos: end_pos + 1].fill_(1)
     return positive_map 
-

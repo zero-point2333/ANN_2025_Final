@@ -13,6 +13,8 @@ import jittor as jt
 import jittor.nn as nn
 from jittor import Var
 
+from util.debug_tools import log_tensor, log_text
+
 
 def _get_clones(module, N, layer_share=False):
     if layer_share:
@@ -253,23 +255,27 @@ class ContrastiveEmbed(nn.Module):
         y = text_dict["encoded_text"]
         text_token_mask = text_dict["text_token_mask"]
 
-        res = x @ y.transpose(-1, -2)
+        log_tensor("y in ContrastiveEmbed", y)
+        res = x @ y.transpose(-1, -2) # @ is workable?
         text_len = res.shape[-1]
         mask_base = jt.logical_not(text_token_mask)[..., :text_len]
         if mask_base.shape[-1] < text_len:
             pad = jt.zeros((mask_base.shape[0], text_len - mask_base.shape[-1]), dtype=mask_base.dtype)
             mask_base = jt.concat([mask_base, pad], -1)
         repeat_len = int(res.shape[1])
-        mask_np = np.repeat(mask_base.numpy()[:, None, :], repeat_len, axis=1)
-        mask = jt.array(mask_np)
-        # debug once
-        if not hasattr(self, "_debug_shape_logged"):
-            print("Contrastive mask/res shapes:", mask.shape, res.shape, flush=True)
-            self._debug_shape_logged = True
+        mask = mask_base[:, None, :].repeat_interleave(repeat_len, dim=1)
+        log_text(f"Contrastive mask/res shapes: {mask.shape}, {res.shape}")
         mask_f = mask.astype(res.dtype)
         res = res + mask_f * (-1e9)
         # padding to max_text_len
-        new_res = jt.full((*res.shape[:-1], self.max_text_len), float("-inf"), dtype=res.dtype)
-        new_res[..., : res.shape[-1]] = res
+        if text_len < self.max_text_len:
+            pad_len = self.max_text_len - text_len
+            # 创建全为 -inf 的 padding tensor
+            pad_tensor = jt.full((*res.shape[:-1], pad_len), float("-inf"), dtype=res.dtype)
+            new_res = jt.concat([res, pad_tensor], dim=-1)
+        elif text_len > self.max_text_len:
+            new_res = res[..., :self.max_text_len]
+        else:
+            new_res = res
 
         return new_res
