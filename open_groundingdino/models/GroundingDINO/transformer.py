@@ -755,8 +755,8 @@ class TransformerDecoder(nn.Module):
                 cross_attn_mask=memory_mask,
             )
             log_tensor(f"decoder.layer{layer_id}.output", output)
-            if jt.any(jt.isnan(output)) | jt.any(jt.isinf(output)):
-                print(f"output layer_id {layer_id} is nan")
+            if jt.any(jt.isnan(output)).item() or jt.any(jt.isinf(output)).item():
+                print(f"output layer_id {layer_id} is nan/inf")
                 try:
                     num_nan = output.isnan().sum().item()
                     num_inf = output.isinf().sum().item()

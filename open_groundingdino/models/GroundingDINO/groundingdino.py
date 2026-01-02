@@ -429,7 +429,7 @@ class GroundingDINO(nn.Module):
         if isinstance(out["pred_logits"], jt.Var):
             out["pred_logits"] = jt.clamp(out["pred_logits"], safe_min, safe_max)
             # 如果出现 nan，将其置为 0 (背景类)
-            if jt.any(jt.isnan(out["pred_logits"])):
+            if jt.any(jt.isnan(out["pred_logits"])).item():
                 out["pred_logits"] = jt.where(
                     jt.isnan(out["pred_logits"]), 
                     jt.zeros_like(out["pred_logits"]), 
@@ -519,12 +519,28 @@ class SetCriterion(nn.Module):
         if src_xyxy.numel() == 0 or tgt_xyxy.numel() == 0:
             losses['loss_giou'] = jt.array(0.0)
         else:
-            invalid = jt.isnan(src_xyxy) | jt.isinf(src_xyxy)
-            if invalid.any().item():
-                src_xyxy = jt.where(invalid, jt.zeros_like(src_xyxy), src_xyxy)
-            invalid = jt.isnan(tgt_xyxy) | jt.isinf(tgt_xyxy)
-            if invalid.any().item():
-                tgt_xyxy = jt.where(invalid, jt.zeros_like(tgt_xyxy), tgt_xyxy)
+            # ================= [Fix Start] =================
+            # 移除 .item() 调用，改用无条件的 Graph 操作
+            # 原代码:
+            # invalid = jt.isnan(src_xyxy) | jt.isinf(src_xyxy)
+            # if invalid.any().item(): # Error: no lock?
+            #     src_xyxy = jt.where(invalid, jt.zeros_like(src_xyxy), src_xyxy)
+            
+            # 新代码: 直接执行 where，不打断计算图
+            invalid_src = jt.isnan(src_xyxy) | jt.isinf(src_xyxy)
+            src_xyxy = jt.where(invalid_src, jt.zeros_like(src_xyxy), src_xyxy)
+
+            # 同理修改 target 的处理
+            # 原代码:
+            # invalid = jt.isnan(tgt_xyxy) | jt.isinf(tgt_xyxy)
+            # if invalid.any().item():
+            #     tgt_xyxy = jt.where(invalid, jt.zeros_like(tgt_xyxy), tgt_xyxy)
+
+            # 新代码:
+            invalid_tgt = jt.isnan(tgt_xyxy) | jt.isinf(tgt_xyxy)
+            tgt_xyxy = jt.where(invalid_tgt, jt.zeros_like(tgt_xyxy), tgt_xyxy)
+            # ================= [Fix End] =================
+
             src_xyxy = jt.concat(
                 [jt.minimum(src_xyxy[:, :2], src_xyxy[:, 2:]),
                  jt.maximum(src_xyxy[:, :2], src_xyxy[:, 2:])],
@@ -542,7 +558,6 @@ class SetCriterion(nn.Module):
         with jt.no_grad():
             losses['loss_xy'] = loss_bbox[..., :2].sum() / num_boxes
             losses['loss_hw'] = loss_bbox[..., 2:].sum() / num_boxes
-
 
         return losses
 
@@ -618,6 +633,7 @@ class SetCriterion(nn.Module):
             
              return_indices: used for vis. if True, the layer0-5 indices will be returned as well.
         """
+        print("Criterion Start")
         one_hot = jt.zeros(outputs['pred_logits'].size(), dtype=jt.int64) # torch.Size([bs, 900, 256])
         token = outputs['token'] 
         
@@ -631,6 +647,7 @@ class SetCriterion(nn.Module):
                 label_map.append(per_label)
             label_map = jt.stack(label_map,dim=0).squeeze(1)
             label_map_list.append(label_map)
+        log_text(f"cat_list: {cat_list}")
         for j in range(len(cat_list)): # bs
             for_match = {
                 "pred_logits" : outputs['pred_logits'][j].unsqueeze(0),
@@ -641,34 +658,93 @@ class SetCriterion(nn.Module):
         # indices : A list of size batch_size, containing tuples of (index_i, index_j) where:
         # - index_i is the indices of the selected predictions (in order)
         # - index_j is the indices of the corresponding selected targets (in order)
-
-        # import pdb; pdb.set_trace()
-        tgt_ids = [v["labels"] for v in targets]
-        # len(tgt_ids) == bs
+        
+        
+        print("Criterion Main Matcher Done!")
+        # ==== OutOfIndex Code ====
+        # for i in range(len(indices)):
+        #     tgt_ids[i]=tgt_ids[i][indices[i][1]]
+        #     one_hot[i,indices[i][0]] = jt.array(label_map_list[i][tgt_ids[i]], dtype=jt.int64)
+        # outputs['one_hot'] = one_hot
+        # ==== OutOfIndex Code ====
+        # ==== Change Code ====
+        _, num_queries, dim = one_hot.shape # bs, 900, 256; stack on bs dim
+        log_text("Criterion Main Matcher After Line 1")
+        
+        tgt_ids_ref = [v["labels"] for v in targets]
+        log_text("Criterion Main Matcher After Line 2")
+            
+        one_hot_list = []
         for i in range(len(indices)):
-            tgt_ids[i]=tgt_ids[i][indices[i][1]]
-            one_hot[i,indices[i][0]] = jt.array(label_map_list[i][tgt_ids[i]], dtype=jt.int64)
+            log_text("Criterion Main Matcher After Line 3")
+            # 1. 创建当前样本的全 0 mask [900, 256]
+            current_one_hot = jt.zeros((num_queries, dim), dtype=jt.int64)
+            log_text("Criterion Main Matcher After Line 4")
+            
+            # 2. 获取匹配的 targets
+            pred_idx = indices[i][0]
+            log_text("Criterion Main Matcher After Line 5")
+            matched_tgt_idx = indices[i][1]
+            log_text("Criterion Main Matcher After Line 6")
+            
+            # [关键修复] 只有当存在匹配时才执行 scatter
+            if pred_idx.numel() > 0: # jittor has numel() function, one can check in cmd line
+                log_text("Criterion Main Matcher After Line 7")
+                current_tgt_ids = tgt_ids_ref[i][matched_tgt_idx]
+                log_text("Criterion Main Matcher After Line 8")
+                
+                # 获取 Token Mask [Matched, 256]
+                matched_maps = label_map_list[i][current_tgt_ids]
+                log_text("Criterion Main Matcher After Line 9")
+                
+                # 构造 scatter 索引 [Matched, 256]
+                index_matrix = pred_idx.unsqueeze(1).repeat(1, dim)
+                log_text("Criterion Main Matcher After Line 10")
+                
+                # Scatter Update
+                current_one_hot = current_one_hot.scatter(0, index_matrix, matched_maps.cast(jt.int64)) # although no highlight, it is valid to use jt.Var.scatter()
+                log_text("Criterion Main Matcher After Line 11")
+            
+            one_hot_list.append(current_one_hot)
+            log_text("Criterion Main Matcher After Line 12")
+            
+        one_hot = jt.stack(one_hot_list, dim=0)
+        log_text("Criterion Main Matcher After Line 13")
         outputs['one_hot'] = one_hot
+        log_text("Criterion Main Matcher After Line 14")
+        # ==== Change Code ====
+        
         if return_indices:
+            log_text("Criterion Main Matcher After Line 15")
             indices0_copy = indices
+            log_text("Criterion Main Matcher After Line 16")
             indices_list = []
+            log_text("Criterion Main Matcher After Line 17")
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_boxes_list = [len(t["labels"]) for t in targets]
+        log_text("Criterion Main Matcher After Line 18")
         num_boxes = sum(num_boxes_list)
+        log_text("Criterion Main Matcher After Line 19")
         num_boxes = jt.array([num_boxes], dtype=jt.float32)
+        log_text("Criterion Main Matcher After Line 20")
         if is_dist_avail_and_initialized():
-            print("unexpected line executing")
+            print("unexpected line executing in SetCriterion.execute()")
             # torch.distributed.all_reduce(num_boxes)
         num_boxes = jt.clamp(num_boxes / get_world_size(), min_v=1).item()
+        log_text("Criterion Main Matcher After Line 21")
 
         # Compute all the requested losses
         losses = {}
         for loss in self.losses:
-            losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes))
+            log_text("Criterion Main Matcher After Line 22")
+            losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes)) # lock error, not runtime error
+            log_text("Criterion Main Matcher After Line 23")
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
+        log_text(f"outputs: {outputs.keys()}")
         if 'aux_outputs' in outputs:
+            print("Dealing Aux Outputs!")
             for idx, aux_outputs in enumerate(outputs['aux_outputs']):
                 indices = []
                 for j in range(len(cat_list)): # bs
@@ -677,13 +753,40 @@ class SetCriterion(nn.Module):
                         'pred_boxes': aux_outputs['pred_boxes'][j].unsqueeze(0)
                     }
                     inds = self.matcher(aux_output_single, [targets[j]], label_map_list[j])
+                    print("Aux Outpus Matcher Done!")
                     indices.extend(inds)
-                one_hot_aux = jt.zeros(outputs['pred_logits'].size(),dtype=jt.int64)
-                tgt_ids = [v["labels"] for v in targets]
+                # ==== OutOfIndex Code ====
+                # one_hot_aux = jt.zeros(outputs['pred_logits'].size(),dtype=jt.int64)
+                # tgt_ids = [v["labels"] for v in targets]
+                # for i in range(len(indices)):
+                #     tgt_ids[i]=tgt_ids[i][indices[i][1]]
+                #     one_hot_aux[i,indices[i][0]] = jt.array(label_map_list[i][tgt_ids[i]], dtype=jt.int64)
+                # aux_outputs['one_hot'] = one_hot_aux
+                # ==== OutOfIndex Code ====
+                # ==== Change Code ====
+                # [修改] 使用 stack + scatter 替代 inplace setitem
+                _, num_queries, dim = outputs['pred_logits'].shape
+                one_hot_aux_list = []
+                tgt_ids_ref = [v["labels"] for v in targets]
+                
                 for i in range(len(indices)):
-                    tgt_ids[i]=tgt_ids[i][indices[i][1]]
-                    one_hot_aux[i,indices[i][0]] = jt.array(label_map_list[i][tgt_ids[i]], dtype=jt.int64)
-                aux_outputs['one_hot'] = one_hot_aux
+                    current_one_hot = jt.zeros((num_queries, dim), dtype=jt.int64)
+                    
+                    pred_idx = indices[i][0]
+                    matched_tgt_idx = indices[i][1]
+                    
+                    # [关键修复] 非空检查
+                    if pred_idx.numel() > 0:
+                        current_tgt_ids = tgt_ids_ref[i][matched_tgt_idx]
+                        matched_maps = label_map_list[i][current_tgt_ids]
+                        
+                        index_matrix = pred_idx.unsqueeze(1).repeat(1, dim)
+                        current_one_hot = current_one_hot.scatter(0, index_matrix, matched_maps.cast(jt.int64))
+                    one_hot_aux_list.append(current_one_hot)
+                
+                aux_outputs['one_hot'] = jt.stack(one_hot_aux_list, dim=0)
+                # ==== Change Code ====
+                
                 aux_outputs['text_mask'] = outputs['text_mask']
                 if return_indices:
                     indices_list.append(indices)
@@ -695,68 +798,95 @@ class SetCriterion(nn.Module):
 
         # interm_outputs loss
         if 'interm_outputs' in outputs:
+            print("Dealing Interm Outputs!")
             interm_outputs = outputs['interm_outputs']
-            pred_boxes_dbg = interm_outputs.get("pred_boxes")
-            log_text("interm_outputs stats", force=True)
-            log_tensor("interm_outputs.pred_logits", interm_outputs.get("pred_logits"), force=True)
-            log_tensor("interm_outputs.pred_boxes", interm_outputs.get("pred_boxes"), force=True)
-            if isinstance(pred_boxes_dbg, jt.Var):
-                log_tensor("pred_boxes_dbg", pred_boxes_dbg)
-                invalid = jt.isnan(pred_boxes_dbg) | jt.isinf(pred_boxes_dbg)
-                log_tensor("invalid for pred_boxes_dbg", invalid)
-                if jt.any(invalid):
-                    pred_boxes_dbg = jt.where(invalid, jt.zeros_like(pred_boxes_dbg), pred_boxes_dbg)
-                pred_boxes_dbg = jt.clamp(pred_boxes_dbg, min_v=0.0, max_v=1.0)
-                interm_outputs["pred_boxes"] = pred_boxes_dbg
-            pred_logits_dbg = interm_outputs.get("pred_logits")
-            if isinstance(pred_logits_dbg, jt.Var):
-                invalid = jt.isnan(pred_logits_dbg) | jt.isinf(pred_logits_dbg)
-                if jt.any(invalid):
-                    pred_logits_dbg = jt.where(invalid, jt.zeros_like(pred_logits_dbg), pred_logits_dbg)
-                pred_logits_dbg = jt.clamp(pred_logits_dbg, min_v=-20.0, max_v=20.0)
-                interm_outputs["pred_logits"] = pred_logits_dbg
-            indices = []
+            
+            # [修复开始]：获取 Logits 和 Boxes，并修正维度
             pred_logits = interm_outputs['pred_logits']
-            pred_boxes = interm_outputs['pred_boxes']
-            single_interm = (pred_boxes.ndim == 2)
-            interm_bs = 1 if single_interm else int(pred_boxes.shape[0])
+            pred_boxes = interm_outputs.get("pred_boxes")
+            
+            # 1. 维度对齐检查与修复
+            # 如果 Boxes 的 Batch 为 1，但 Logits 的 Batch > 1，说明 Boxes 需要广播
+            if pred_boxes.shape[0] == 1 and pred_logits.shape[0] > 1:
+                log_text(f"[Fix] Expanding interm_pred_boxes from {pred_boxes.shape} to match logits {pred_logits.shape}")
+                pred_boxes = pred_boxes.repeat(pred_logits.shape[0], 1, 1)
+                # 这一步非常重要：必须更新字典中的值，因为后续 self.get_loss 会直接从 dict 里取值计算 Loss
+                interm_outputs['pred_boxes'] = pred_boxes 
+
+            # 2. 数值稳定性保护 (保持你原有的逻辑，稍作整理)
+            log_text("interm_outputs stats", force=True)
+            log_tensor("interm_outputs.pred_logits", pred_logits, force=True)
+            log_tensor("interm_outputs.pred_boxes", pred_boxes, force=True)
+
+            if isinstance(pred_boxes, jt.Var):
+                invalid = jt.isnan(pred_boxes) | jt.isinf(pred_boxes)
+                if jt.any(invalid).item():
+                    pred_boxes = jt.where(invalid, jt.zeros_like(pred_boxes), pred_boxes)
+                pred_boxes = jt.clamp(pred_boxes, min_v=0.0, max_v=1.0)
+                interm_outputs["pred_boxes"] = pred_boxes # update back
+
+            if isinstance(pred_logits, jt.Var):
+                invalid = jt.isnan(pred_logits) | jt.isinf(pred_logits)
+                if jt.any(invalid).item():
+                    pred_logits = jt.where(invalid, jt.zeros_like(pred_logits), pred_logits)
+                pred_logits = jt.clamp(pred_logits, min_v=-20.0, max_v=20.0)
+                interm_outputs["pred_logits"] = pred_logits # update back
+
+            # 3. 匹配循环 (逻辑简化，因为维度现在已经对其了)
+            indices = []
+            # 此时 pred_logits 和 pred_boxes 的 batch 维度应该一致了
             for j in range(len(cat_list)): # bs
-                if single_interm:
-                    pl = pred_logits
-                    pb = pred_boxes
-                else:
-                    jj = j if j < interm_bs else 0
-                    pl = pred_logits[jj]
-                    pb = pred_boxes[jj]
                 interm_output_single = {
-                    'pred_logits' : pl.unsqueeze(0),
-                    'pred_boxes': pb.unsqueeze(0)
+                    'pred_logits' : interm_outputs['pred_logits'][j].unsqueeze(0),
+                    'pred_boxes': interm_outputs['pred_boxes'][j].unsqueeze(0)
                 }
                 inds = self.matcher(interm_output_single, [targets[j]], label_map_list[j])
-                print("Matcher Done!")
+                print("Interm Outputs Matcher Done!")
                 indices.extend(inds)
-            one_hot_aux = jt.zeros(outputs['pred_logits'].size(),dtype=jt.int64)
-            tgt_ids = []
+
+            # ==== Change Code ====
+            _, num_queries, dim = outputs['pred_logits'].shape
+            if 'pred_logits' in interm_outputs:
+                 _, num_queries, _ = interm_outputs['pred_logits'].shape
+            one_hot_interm_list = []
+            tgt_ids_ref = []
             for v in targets:
                 labels = v["labels"]
                 if isinstance(labels, jt.Var):
-                    tgt_ids.append(labels)
+                    tgt_ids_ref.append(labels)
                 else:
                     if hasattr(labels, "detach") and hasattr(labels, "cpu") and hasattr(labels, "numpy"):
                         labels = labels.detach().cpu().numpy()
-                    tgt_ids.append(jt.array(labels))
+                    tgt_ids_ref.append(jt.array(labels))
+                    
             for i in range(len(indices)):
-                tgt_ids[i]=tgt_ids[i][indices[i][1]]
-                one_hot_aux[i,indices[i][0]] = jt.array(label_map_list[i][tgt_ids[i]], dtype=jt.int64)
-            interm_outputs['one_hot'] = one_hot_aux
+                current_one_hot = jt.zeros((num_queries, dim), dtype=jt.int64)
+                pred_idx = indices[i][0]
+                matched_tgt_idx = indices[i][1]
+                
+                # [关键修复] 非空检查
+                if pred_idx.numel() > 0:
+                    current_tgt_ids = tgt_ids_ref[i][matched_tgt_idx]
+                    matched_maps = label_map_list[i][current_tgt_ids]
+                    
+                    index_matrix = pred_idx.unsqueeze(1).repeat(1, dim)
+                    current_one_hot = current_one_hot.scatter(0, index_matrix, matched_maps.cast(jt.int64))
+                one_hot_interm_list.append(current_one_hot)
+
+            interm_outputs['one_hot'] = jt.stack(one_hot_interm_list, dim=0)
+            # ==== Change Code ====
+            
             interm_outputs['text_mask'] = outputs['text_mask']
             if return_indices:
                 indices_list.append(indices)
+                
             for loss in self.losses:
                 kwargs = {}
+                # get_loss 内部会使用 interm_outputs['pred_boxes']，现在它是扩展后的 correct shape
                 l_dict = self.get_loss(loss, interm_outputs, targets, indices, num_boxes, **kwargs)
                 l_dict = {k + f'_interm': v for k, v in l_dict.items()}
                 losses.update(l_dict)
+            # [修复结束]
 
         if return_indices:
             indices_list.append(indices0_copy)
@@ -936,7 +1066,7 @@ def build_groundingdino(args):
 def create_positive_map(tokenized, tokens_positive,cat_list,caption):
     """construct a map such that positive_map[i,j] = True iff box i is associated to token j"""
     positive_map = jt.zeros((len(tokens_positive), 256), dtype=jt.float32)
-
+    max_text_len = int(positive_map.shape[1])
     for j, label in enumerate(tokens_positive):
         if isinstance(label, jt.Var):
             if label.ndim != 0:
@@ -945,7 +1075,8 @@ def create_positive_map(tokenized, tokens_positive,cat_list,caption):
         elif hasattr(label, "item"):
             label = label.item()
         label = int(label)
-
+        if label < 0 or label >= len(cat_list):
+            continue
         start_ind = caption.find(cat_list[label])
         end_ind = start_ind + len(cat_list[label]) - 1
         beg_pos = tokenized.char_to_token(start_ind)
@@ -985,6 +1116,10 @@ def create_positive_map(tokenized, tokens_positive,cat_list,caption):
             continue
         if beg_pos > end_pos:
             continue
+        if beg_pos >= max_text_len:
+            continue
+        if end_pos >= max_text_len:
+            end_pos = max_text_len - 1
         # assert beg_pos is not None and end_pos is not None
         positive_map[j,beg_pos: end_pos + 1].fill_(1)
     return positive_map 

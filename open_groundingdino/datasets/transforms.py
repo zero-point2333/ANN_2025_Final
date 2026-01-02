@@ -199,9 +199,12 @@ class RandomSizeCrop(object):
         init_boxes = len(target["boxes"])
         max_patience = 10
         for i in range(max_patience):
-            w = random.randint(self.min_size, min(img.width, self.max_size))
-            h = random.randint(self.min_size, min(img.height, self.max_size))
-
+            max_w = min(img.width, self.max_size)
+            max_h = min(img.height, self.max_size)
+            min_w = min(self.min_size, max_w)
+            min_h = min(self.min_size, max_h)
+            w = random.randint(min_w, max_w)
+            h = random.randint(min_h, max_h)
             i = random.randint(0, img.height - h) if img.height > h else 0
             j = random.randint(0, img.width - w) if img.width > w else 0
             region = (i, j, h, w)

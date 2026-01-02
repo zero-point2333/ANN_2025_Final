@@ -410,23 +410,31 @@ class BasicLayer(nn.Module):
         # calculate attention mask for SW-MSA
         Hp = int(np.ceil(H / self.window_size)) * self.window_size
         Wp = int(np.ceil(W / self.window_size)) * self.window_size
-        img_mask = jt.zeros((1, Hp, Wp, 1))  # 1 Hp Wp 1
-        h_slices = (
-            slice(0, -self.window_size),
-            slice(-self.window_size, -self.shift_size),
-            slice(-self.shift_size, None),
-        )
-        w_slices = (
-            slice(0, -self.window_size),
-            slice(-self.window_size, -self.shift_size),
-            slice(-self.shift_size, None),
-        )
+        h_sizes = [
+            Hp - self.window_size,
+            self.window_size - self.shift_size,
+            self.shift_size,
+        ]
+        w_sizes = [
+            Wp - self.window_size,
+            self.window_size - self.shift_size,
+            self.shift_size,
+        ]
+        rows = []
         cnt = 0
-        for h in h_slices:
-            for w in w_slices:
-                img_mask[:, h, w, :] = cnt
+        for h_size in h_sizes:
+            row_blocks = []
+            for w_size in w_sizes:
+                if h_size > 0 and w_size > 0:
+                    block = jt.full((1, h_size, w_size, 1), cnt)
+                    row_blocks.append(block)
                 cnt += 1
-
+            if row_blocks:
+                rows.append(jt.concat(row_blocks, dim=2))
+        if rows:
+            img_mask = jt.concat(rows, dim=1)
+        else:
+            img_mask = jt.zeros((1, 0, 0, 1))
         mask_windows = window_partition(
             img_mask, self.window_size
         )  # nW, window_size, window_size, 1

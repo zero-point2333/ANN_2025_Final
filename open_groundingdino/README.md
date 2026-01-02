@@ -149,10 +149,12 @@ config/datasets_mixed_odvg.json      # support mixed dataset for both OD and VG
 - **Train/Eval**:
 
 ```  bash
-# train/eval on torch.distributed.launch:
-bash train_dist.sh  ${GPU_NUM} ${CFG} ${DATASETS} ${OUTPUT_DIR}
-bash test_dist.sh  ${GPU_NUM} ${CFG} ${DATASETS} ${OUTPUT_DIR}
+# single-process (Jittor):
+bash train_dist.sh  [CFG] [DATASETS] [OUTPUT_DIR] [PRETRAIN_MODEL_PATH]
+bash test_dist.sh  [CFG] [DATASETS] [OUTPUT_DIR] [PRETRAIN_MODEL_PATH]
 
+# optional: single-node multi-GPU via Jittor DataParallel
+# CUDA_VISIBLE_DEVICES=0,1 EXTRA_OPTIONS="--distributed True" bash train_dist.sh ...
 # train/eval on slurm cluster：
 bash train_slurm.sh  ${PARTITION} ${GPU_NUM} ${CFG} ${DATASETS} ${OUTPUT_DIR}
 bash test_slurm.sh  ${PARTITION} ${GPU_NUM} ${CFG} ${DATASETS} ${OUTPUT_DIR}

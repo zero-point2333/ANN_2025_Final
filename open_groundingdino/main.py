@@ -205,6 +205,10 @@ def main(args):
 
     if not args.eval:
         data_loader_train = DataLoader(dataset_train, sampler=sampler_train, batch_size=args.batch_size, drop_last=True, collate_fn=utils.collate_fn, num_workers=args.num_workers)
+        data_loader_train_sz = 0
+        for _ in data_loader_train:
+            data_loader_train_sz = data_loader_train_sz + 1
+        print(f"Data Loader Size: {data_loader_train_sz}")
 
     data_loader_val = DataLoader(dataset_val, batch_size=4, sampler=sampler_val,
                                  drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)

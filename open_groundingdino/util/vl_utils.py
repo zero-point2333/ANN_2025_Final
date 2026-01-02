@@ -14,10 +14,18 @@ def create_positive_map_from_span(tokenized, token_span, max_text_len=256):
         - token_span: list with length num_boxes.
             - each item: [start_idx, end_idx]
     """
-    # jt.Var, shape: (num_boxes, max_text_len)
-    positive_map: jt.Var = jt.zeros((len(token_span), max_text_len), dtype=jt.float32)
+    rows = []
 
-    for j, tok_list in enumerate(token_span):
+    def _concat_1d(parts, dtype):
+        valid = [p for p in parts if int(p.shape[0]) > 0]
+        if not valid:
+            return jt.zeros((0,), dtype=dtype)
+        if len(valid) == 1:
+            return valid[0]
+        return jt.concat(valid, dim=0)
+
+    for tok_list in token_span:
+        row_masks = []
         for (beg, end) in tok_list:
             beg_pos = tokenized.char_to_token(beg)
             end_pos = tokenized.char_to_token(end - 1)
@@ -38,12 +46,36 @@ def create_positive_map_from_span(tokenized, token_span, max_text_len=256):
             if beg_pos is None or end_pos is None:
                 continue
 
-            assert beg_pos is not None and end_pos is not None
+            beg_pos = int(beg_pos)
+            end_pos = int(end_pos)
+            if beg_pos >= max_text_len:
+                continue
+            end_pos = min(end_pos, max_text_len - 1)
+            if end_pos < beg_pos:
+                continue
+
             if os.environ.get("SHILONG_DEBUG_ONLY_ONE_POS", None) == "TRUE":
-                positive_map[j, beg_pos] = 1.0
+                left = jt.zeros((beg_pos,), dtype=jt.float32)
+                mid = jt.ones((1,), dtype=jt.float32)
+                right = jt.zeros((max_text_len - beg_pos - 1,), dtype=jt.float32)
+                row_masks = [_concat_1d([left, mid, right], jt.float32)]
                 break
-            else:
-                positive_map[j, beg_pos : end_pos + 1] = 1.0
+            span_len = end_pos - beg_pos + 1
+            left = jt.zeros((beg_pos,), dtype=jt.float32)
+            mid = jt.ones((span_len,), dtype=jt.float32)
+            right = jt.zeros((max_text_len - end_pos - 1,), dtype=jt.float32)
+            row_masks.append(_concat_1d([left, mid, right], jt.float32))
+
+        if row_masks:
+            row = jt.stack(row_masks, dim=0).max(dim=0)[0]
+        else:
+            row = jt.zeros((max_text_len,), dtype=jt.float32)
+        rows.append(row.unsqueeze(0))
+
+    if rows:
+        positive_map = jt.concat(rows, dim=0)
+    else:
+        positive_map = jt.zeros((0, max_text_len), dtype=jt.float32)
 
     return positive_map / (positive_map.sum(-1)[:, None] + 1e-6)
 

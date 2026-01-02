@@ -11,6 +11,7 @@ from typing import Iterable
 import jittor as jt
 import jittor.nn as nn
 
+from util.debug_tools import log_text
 import util.misc as utils
 from datasets.coco_eval import CocoEvaluator
 from datasets.cocogrounding_eval import CocoGroundingEvaluator
@@ -22,7 +23,7 @@ def train_one_epoch(model, criterion,
                     data_loader: Iterable, optimizer,
                     epoch: int, max_norm: float = 0, 
                     wo_class_error=False, lr_scheduler=None, args=None, logger=None):
-
+    
     model.train()
     criterion.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -30,7 +31,7 @@ def train_one_epoch(model, criterion,
     if not wo_class_error:
         metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = 'Epoch: [{}]'.format(epoch)
-    print_freq = 10
+    print_freq = 1
 
     _cnt = 0
 
@@ -40,11 +41,15 @@ def train_one_epoch(model, criterion,
         cap_list = [t["cap_list"] for t in targets]
         targets = [{k: v for k, v in t.items() if isinstance(v, jt.Var)} for t in targets]
 
+        print("model infer start")
         outputs = model(samples, captions=captions)
+        print("model infer done, criterion infer start")
         loss_dict = criterion(outputs, targets, cap_list, captions)
+        print("criterion infer done")
 
         weight_dict = criterion.weight_dict
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+        print("losses cal done")
 
         loss_dict_reduced = utils.reduce_dict(loss_dict)
         loss_dict_reduced_unscaled = {f'{k}_unscaled': v
@@ -52,8 +57,10 @@ def train_one_epoch(model, criterion,
         loss_dict_reduced_scaled = {k: v * weight_dict[k]
                                     for k, v in loss_dict_reduced.items() if k in weight_dict}
         losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
+        print("losses_reduced_scaled cal done")
 
         loss_value = losses_reduced_scaled.item()
+        print("losses_value cal done")
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
@@ -61,11 +68,11 @@ def train_one_epoch(model, criterion,
             sys.exit(1)
 
         assert isinstance(optimizer, jt.optim.AdamW)
-        optimizer.zero_grad()
-        optimizer.backward(losses)
-        # if max_norm > 0 and hasattr(nn, "utils") and hasattr(nn.utils, "clip_grad_norm_"):
-        #     nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-        optimizer.step()
+        # 这一行直接完成了 zero_grad, backward 和 step
+        optimizer.step(losses)
+        if max_norm > 0 and hasattr(nn, "utils") and hasattr(nn.utils, "clip_grad_norm_"):
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+        print("optimizer set")
 
         if args.onecyclelr:
             lr_scheduler.step()
