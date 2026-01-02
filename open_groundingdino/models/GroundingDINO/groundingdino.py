@@ -30,7 +30,7 @@ from util.misc import (
     nested_tensor_from_tensor_list,
 )
 from util.utils import div_trunc, get_phrases_from_posmap
-from util.debug_tools import log_tensor, log_text
+from util.debug_tools import debug_enabled, log_tensor, log_text
 from util.visualizer import COCOVisualizer
 from util.vl_utils import create_positive_map_from_span
 
@@ -502,40 +502,40 @@ class SetCriterion(nn.Module):
            The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
         """
         assert 'pred_boxes' in outputs
+        log_text("loss_boxes enter")
+        log_text(f"loss_boxes num_boxes={num_boxes} indices_len={len(indices)}")
+        log_tensor("loss_boxes.pred_boxes", outputs['pred_boxes'])
         idx = self._get_src_permutation_idx(indices)
         src_boxes = outputs['pred_boxes'][idx]
         target_boxes = jt.concat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-
+        log_tensor("loss_boxes.src_boxes", src_boxes)
+        log_tensor("loss_boxes.target_boxes", target_boxes)
         # Use elementwise L1 to keep [num_boxes, 4] for downstream slicing.
         loss_bbox = (src_boxes - target_boxes).abs()
         if loss_bbox.ndim == 1:
             loss_bbox = loss_bbox.reshape(1, -1)
-
+        if debug_enabled():
+            jt.sync_all()
+            log_text("loss_boxes after loss_bbox", force=True)
         losses = {}
         losses['loss_bbox'] = loss_bbox.sum() / num_boxes
 
         src_xyxy = box_ops.box_cxcywh_to_xyxy(src_boxes)
         tgt_xyxy = box_ops.box_cxcywh_to_xyxy(target_boxes)
-        if src_xyxy.numel() == 0 or tgt_xyxy.numel() == 0:
+        if debug_enabled():
+            jt.sync_all()
+            log_text("loss_boxes after xyxy convert", force=True)
+        if src_xyxy.shape[0] == 0 or tgt_xyxy.shape[0] == 0:
             losses['loss_giou'] = jt.array(0.0)
         else:
-            invalid = jt.isnan(src_xyxy) | jt.isinf(src_xyxy)
-            if invalid.any().item(): # Error: no lock?
-                src_xyxy = jt.where(invalid, jt.zeros_like(src_xyxy), src_xyxy)
-            invalid = jt.isnan(tgt_xyxy) | jt.isinf(tgt_xyxy)
-            if invalid.any().item():
-                tgt_xyxy = jt.where(invalid, jt.zeros_like(tgt_xyxy), tgt_xyxy)
-            src_xyxy = jt.concat(
-                [jt.minimum(src_xyxy[:, :2], src_xyxy[:, 2:]),
-                 jt.maximum(src_xyxy[:, :2], src_xyxy[:, 2:])],
-                dim=1,
-            )
-            tgt_xyxy = jt.concat(
-                [jt.minimum(tgt_xyxy[:, :2], tgt_xyxy[:, 2:]),
-                 jt.maximum(tgt_xyxy[:, :2], tgt_xyxy[:, 2:])],
-                dim=1,
-            )
-            loss_giou = 1 - jt.diag(box_ops.generalized_box_iou(src_xyxy, tgt_xyxy))
+
+            if debug_enabled():
+                jt.sync_all()
+                log_text("loss_boxes before giou", force=True)
+            loss_giou = 1 - box_ops.generalized_box_iou_pairwise(src_xyxy, tgt_xyxy)
+            if debug_enabled():
+                jt.sync_all()
+                log_text("loss_boxes after giou", force=True)
             losses['loss_giou'] = loss_giou.sum() / num_boxes
 
         # calculate the x,y and h,w loss
@@ -607,8 +607,8 @@ class SetCriterion(nn.Module):
             'boxes': self.loss_boxes,
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
+        log_text(f"get_loss enter: {loss}, outputs_keys={list(outputs.keys())}")
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
-
     def execute(self, outputs, targets, cat_list, caption, return_indices=False):
         """ This performs the loss computation.
         Parameters:

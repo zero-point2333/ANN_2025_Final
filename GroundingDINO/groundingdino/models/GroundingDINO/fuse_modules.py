@@ -143,19 +143,6 @@ class BiMultiHeadAttention(nn.Module):
         nn.init.zero_(self.out_l_proj.bias)
 
     def execute(self, v: jt.Var, l: jt.Var, attention_mask_v: Optional[jt.Var], attention_mask_l: Optional[jt.Var]):
-        """_summary_
-
-        Args:
-            v (_type_): bs, n_img, dim
-            l (_type_): bs, n_text, dim
-            attention_mask_v (_type_, optional): _description_. bs, n_img
-            attention_mask_l (_type_, optional): _description_. bs, n_text
-
-        Returns:
-            _type_: _description_
-        """
-        # if os.environ.get('IPDB_SHILONG_DEBUG', None) == 'INFO':
-        #     import ipdb; ipdb.set_trace()
         bsz, tgt_len, _ = v.shape
 
         query_states: jt.Var = self.v_proj(v) * self.scale
@@ -172,33 +159,21 @@ class BiMultiHeadAttention(nn.Module):
         src_len = key_states.shape[1]
         attn_weights: jt.Var = jt.bmm(query_states, key_states.transpose(1, 2))  # bs*nhead, nimg, ntxt
 
-        if attn_weights.shape != (bsz * self.num_heads, tgt_len, src_len):
-            raise ValueError(
-                f"Attention weights should be of size {(bsz * self.num_heads, tgt_len, src_len)}, but is {attn_weights.shape}"
-            )
-
         if self.stable_softmax_2d:
             attn_weights: jt.Var = attn_weights - attn_weights.max()
 
         if self.clamp_min_for_underflow:
-            attn_weights = jt.clamp(
-                attn_weights, min_v=-50000
-            )  # Do not increase -50000, data type half has quite limited range
+            attn_weights = jt.clamp(attn_weights, min_v=-50000)
         if self.clamp_max_for_overflow:
-            attn_weights = jt.clamp(
-                attn_weights, max_v=50000
-            )  # Do not increase 50000, data type half has quite limited range
+            attn_weights = jt.clamp(attn_weights, max_v=50000)
 
         attn_weights_T: jt.Var = attn_weights.transpose(1, 2)
         attn_weights_l: jt.Var = attn_weights_T - attn_weights_T.max(dim=-1, keepdims=True)[0]
+        
         if self.clamp_min_for_underflow:
-            attn_weights_l = jt.clamp(
-                attn_weights_l, min_v=-50000
-            )  # Do not increase -50000, data type half has quite limited range
+            attn_weights_l = jt.clamp(attn_weights_l, min_v=-50000)
         if self.clamp_max_for_overflow:
-            attn_weights_l = jt.clamp(
-                attn_weights_l, max_v=50000
-            )  # Do not increase 50000, data type half has quite limited range
+            attn_weights_l = jt.clamp(attn_weights_l, max_v=50000)
 
         # mask vison for language
         if attention_mask_v is not None:
@@ -211,7 +186,7 @@ class BiMultiHeadAttention(nn.Module):
 
         # mask language for vision
         if attention_mask_l is not None:
-            attention_mask_l = ( # though it has no highlight, it can actually work out
+            attention_mask_l = (
                 attention_mask_l[:, None, None, :].repeat(1, self.num_heads, 1, 1).flatten(0, 1)
             )
             attn_weights = jt.masked_fill(attn_weights, attention_mask_l, float("-inf"))
@@ -223,16 +198,6 @@ class BiMultiHeadAttention(nn.Module):
         attn_output_v: jt.Var = jt.bmm(attn_probs_v, value_l_states)
         attn_output_l: jt.Var = jt.bmm(attn_probs_l, value_v_states)
 
-        if attn_output_v.shape != (bsz * self.num_heads, tgt_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output_v` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is {attn_output_v.shape}"
-            )
-
-        if attn_output_l.shape != (bsz * self.num_heads, src_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output_l` should be of size {(bsz, self.num_heads, src_len, self.head_dim)}, but is {attn_output_l.shape}"
-            )
-
         attn_output_v = attn_output_v.view(bsz, self.num_heads, tgt_len, self.head_dim)
         attn_output_v = attn_output_v.transpose(1, 2)
         attn_output_v = attn_output_v.reshape(bsz, tgt_len, self.embed_dim)
@@ -241,11 +206,42 @@ class BiMultiHeadAttention(nn.Module):
         attn_output_l = attn_output_l.transpose(1, 2)
         attn_output_l = attn_output_l.reshape(bsz, src_len, self.embed_dim)
 
-        attn_output_v = self.out_v_proj(attn_output_v)
-        attn_output_l = self.out_l_proj(attn_output_l)
+        # -------------------------------------------------------------------------
+        # 修改开始: 使用分块处理 (Chunking) 来避免 Segfault 和降低显存
+        # -------------------------------------------------------------------------
+        
+        # 1. 处理 Vision Output
+        # 如果序列长度小于Chunk大小，直接执行（保持小数据的效率）
+        if tgt_len <= self.chunk_size_inference:
+            attn_output_v = self.out_v_proj(attn_output_v)
+        else:
+            # 否则进行切片循环
+            v_chunks = []
+            for i in range(0, tgt_len, self.chunk_size_inference):
+                # 切片: [bs, chunk, dim]
+                chunk = attn_output_v[:, i : i + self.chunk_size_inference, :]
+                # 线性层计算
+                chunk_out = self.out_v_proj(chunk)
+                v_chunks.append(chunk_out)
+            # 拼接回完整 Tensor
+            attn_output_v = jt.concat(v_chunks, dim=1)
+
+        # 2. 处理 Language Output
+        if src_len <= self.chunk_size_inference:
+            attn_output_l = self.out_l_proj(attn_output_l)
+        else:
+            l_chunks = []
+            for i in range(0, src_len, self.chunk_size_inference):
+                chunk = attn_output_l[:, i : i + self.chunk_size_inference, :]
+                chunk_out = self.out_l_proj(chunk)
+                l_chunks.append(chunk_out)
+            attn_output_l = jt.concat(l_chunks, dim=1)
+
+        # -------------------------------------------------------------------------
+        # 修改结束
+        # -------------------------------------------------------------------------
 
         return attn_output_v, attn_output_l
-
 
 # Bi-Direction MHA (text->image, image->text)
 class BiAttentionBlock(nn.Module):
