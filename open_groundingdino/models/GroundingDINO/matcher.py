@@ -52,25 +52,7 @@ class HungarianMatcher(nn.Module):
 
     @jt.no_grad()
     def execute(self, outputs, targets, label_map):
-        # print("Hungarian Matcher Start") # 可以注释掉避免刷屏
-        """ Performs the matching
-        Params:
-            outputs: This is a dict that contains at least these entries:
-                 "pred_logits": Tensor of dim [batch_size, num_queries, num_classes] with the classification logits
-                 "pred_boxes": Tensor of dim [batch_size, num_queries, 4] with the predicted box coordinates
-            targets: This is a list of targets (len(targets) = batch_size), where each target is a dict containing:
-                 "labels": Tensor of dim [num_target_boxes] (where num_target_boxes is the number of ground-truth
-                           objects in the target) containing the class labels
-                 "boxes": Tensor of dim [num_target_boxes, 4] containing the target box coordinates
-        Returns:
-            A list of size batch_size, containing tuples of (index_i, index_j) where:
-                - index_i is the indices of the selected predictions (in order)
-                - index_j is the indices of the corresponding selected targets (in order)
-            For each batch element, it holds:
-                len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
-        """
-
-        # [修改点 2] 预先检查 sizes，处理整个 batch 都为空的极端情况
+        # 1. 预先检查 sizes
         sizes = [len(v["boxes"]) for v in targets]
         if sum(sizes) == 0:
             log_text("[Matcher Warning] No targets found in current batch! Returning empty matches.")
@@ -78,107 +60,73 @@ class HungarianMatcher(nn.Module):
 
         bs, num_queries = outputs["pred_logits"].shape[:2]
 
-        # We flatten to compute the cost matrices in a batch
-        out_prob = outputs["pred_logits"].flatten(0, 1).sigmoid()  # [batch_size * num_queries, num_classes]
-        out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
+        # 2. Flatten
+        out_prob = outputs["pred_logits"].flatten(0, 1).sigmoid()  
+        out_bbox = outputs["pred_boxes"].flatten(0, 1)  
 
-        # Also concat the target labels and boxes
-        tgt_ids = jt.concat([v["labels"].reshape(-1) for v in targets])
+        # 3. Concat targets
+        # [优化] 确保 reshape 和类型正确
+        tgt_ids = jt.concat([v["labels"].reshape(-1) for v in targets]).int()
         tgt_bbox = jt.concat([v["boxes"].reshape(-1, 4) for v in targets])
 
-        # Compute the classification cost.
+        # 4. Compute Classification Cost (重点修改区域)
         alpha = self.focal_alpha
         gamma = 2.0
 
-        new_label_map=label_map[tgt_ids]
+        # 取出对应的 label_map
+        new_label_map = label_map[tgt_ids] # shape: [Total_Targets, Num_Classes]
 
+        # 计算 Focal Loss 组件
         neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
         pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
-        new_label_map=new_label_map
+
+        # [修复] 移除 Python 循环，使用矩阵运算
+        # 归一化: 避免除以0，加上 eps
+        # new_label_map shape: [Total_Targets, 256]
+        new_label_map = new_label_map / (new_label_map.sum(dim=1, keepdims=True) + 1e-6)
         
+        # 矩阵乘法: [Total_Queries, 256] @ [256, Total_Targets] -> [Total_Queries, Total_Targets]
+        # 使用 transpose(0, 1) 进行转置
+        cost_class = (pos_cost_class @ new_label_map.transpose(0, 1)) - \
+                     (neg_cost_class @ new_label_map.transpose(0, 1))
+
+        # 5. Compute BBox Cost
+        # 确保 cdist 实现是高效的，如果 util.utils.cdist 也是循环实现的，建议改为广播写法
+        # 如果没有问题则保持原样
         cost_bbox = cdist(out_bbox, tgt_bbox, p=1)
 
-        # cost_class=(pos_cost_class @ new_label_map.T - neg_cost_class@ new_label_map.T)
-        cost_class=[]
-        for idx_map in new_label_map:
-            assert isinstance(idx_map, jt.Var)
-            idx_map = idx_map / idx_map.sum()
-            cost_class.append(pos_cost_class @ idx_map - neg_cost_class@ idx_map)
-        if cost_class:
-            cost_class = jt.transpose(jt.stack(cost_class, dim=0), 0, 1)
-        else:
-            cost_class=jt.zeros_like(cost_bbox)
-        
-        # Compute the giou cost betwen boxes
+        # 6. Compute GIoU Cost
         cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
         
-        # Final cost matrix
+        # 7. Final Cost Matrix
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
-        assert isinstance(C, jt.Var)
         C = C.view(bs, num_queries, -1)
+        
+        # 数值保护
         invalid = jt.isnan(C) | jt.isinf(C)
         C = jt.where(invalid, jt.zeros_like(C), C)
 
-        # 校验尺寸逻辑，保持原有的 debug 输出
-        total_targets = int(sum(sizes))
-        if total_targets != int(C.shape[-1]):
-            log_text(f"[Matcher Error] Shape mismatch: Total targets {total_targets} vs Cost Matrix width {C.shape[-1]}")
-            # 原有的详细 debug 信息保持不变，如果你需要也可以换成 log_text
-            box_shapes = [tuple(v["boxes"].shape) for v in targets]
-            label_shapes = [tuple(v["labels"].shape) for v in targets]
-            print(
-                "[DEBUG] matcher split mismatch: "
-                f"C.shape={tuple(C.shape)} sizes={sizes} sum_sizes={total_targets} "
-                f"tgt_bbox_shape={tuple(tgt_bbox.shape)} "
-                f"boxes_shapes={box_shapes} labels_shapes={label_shapes}",
-                flush=True,
-            )
-            try:
-                print(
-                    "[DEBUG] matcher label_map shapes: "
-                    f"label_map={tuple(label_map.shape)} new_label_map={tuple(new_label_map.shape)}",
-                    flush=True,
-                )
-            except Exception:
-                pass
-
+        # 8. Split & Match (你原本的这部分逻辑非常好，保持不变)
         C_split = C.split(sizes, -1)
-        
-        # [修改点 3] 修复 Segfault 的核心逻辑：不再使用列表推导式，而是显式循环处理
         indices = []
         for i, (c_tensor, count) in enumerate(zip(C_split, sizes)):
-            # 3.1 检查单张图是否没有目标
             if count == 0:
-                log_text(f"[Matcher Info] Batch index {i} has NO targets (count=0). Skipping assignment.")
-                # 直接添加空结果，跳过 numpy 转换
                 indices.append((np.array([], dtype=np.int64), np.array([], dtype=np.int64)))
                 continue
 
-            # 3.2 提取当前 batch 的 Cost Matrix
-            # c_tensor shape: [batch_size, num_queries, count], 取第 i 个 batch
             weight_mat = c_tensor[i] 
-            
-            # 3.3 强制同步，确保计算完成，避免异步导致的内存访问错误
-            weight_mat.sync()
-            
-            # 3.4 转换为 numpy
+            weight_mat.sync() # 关键！
             weight_np = weight_mat.numpy()
-            
-            # 3.5 防御性编程：处理 NaN (尽管前面已经处理过，这里为了 Scipy 稳定性再次确保)
             weight_np = np.nan_to_num(weight_np, posinf=1e10, neginf=-1e10)
 
             try:
-                # 正常匹配
                 indices.append(linear_sum_assignment(weight_np))
             except Exception as e:
-                log_text(f"[Matcher Failed] Scipy match failed at batch {i}. Error: {e}")
-                log_text(f"  - Weight shape: {weight_np.shape}, Has Nan: {np.isnan(weight_np).any()}")
-                # 降级方案：Simple MinSum
+                log_text(f"[Matcher Failed] batch {i}, error: {e}")
                 idx_i = np.argmin(weight_np, axis=0)
                 idx_j = np.arange(count)
                 indices.append((idx_i, idx_j))
 
-        # print("Hungarian Matcher Done") # 可以注释掉
         return [(jt.array(i, dtype=jt.int64), jt.array(j, dtype=jt.int64)) for i, j in indices]
 
 

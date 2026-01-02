@@ -519,28 +519,12 @@ class SetCriterion(nn.Module):
         if src_xyxy.numel() == 0 or tgt_xyxy.numel() == 0:
             losses['loss_giou'] = jt.array(0.0)
         else:
-            # ================= [Fix Start] =================
-            # 移除 .item() 调用，改用无条件的 Graph 操作
-            # 原代码:
-            # invalid = jt.isnan(src_xyxy) | jt.isinf(src_xyxy)
-            # if invalid.any().item(): # Error: no lock?
-            #     src_xyxy = jt.where(invalid, jt.zeros_like(src_xyxy), src_xyxy)
-            
-            # 新代码: 直接执行 where，不打断计算图
-            invalid_src = jt.isnan(src_xyxy) | jt.isinf(src_xyxy)
-            src_xyxy = jt.where(invalid_src, jt.zeros_like(src_xyxy), src_xyxy)
-
-            # 同理修改 target 的处理
-            # 原代码:
-            # invalid = jt.isnan(tgt_xyxy) | jt.isinf(tgt_xyxy)
-            # if invalid.any().item():
-            #     tgt_xyxy = jt.where(invalid, jt.zeros_like(tgt_xyxy), tgt_xyxy)
-
-            # 新代码:
-            invalid_tgt = jt.isnan(tgt_xyxy) | jt.isinf(tgt_xyxy)
-            tgt_xyxy = jt.where(invalid_tgt, jt.zeros_like(tgt_xyxy), tgt_xyxy)
-            # ================= [Fix End] =================
-
+            invalid = jt.isnan(src_xyxy) | jt.isinf(src_xyxy)
+            if invalid.any().item(): # Error: no lock?
+                src_xyxy = jt.where(invalid, jt.zeros_like(src_xyxy), src_xyxy)
+            invalid = jt.isnan(tgt_xyxy) | jt.isinf(tgt_xyxy)
+            if invalid.any().item():
+                tgt_xyxy = jt.where(invalid, jt.zeros_like(tgt_xyxy), tgt_xyxy)
             src_xyxy = jt.concat(
                 [jt.minimum(src_xyxy[:, :2], src_xyxy[:, 2:]),
                  jt.maximum(src_xyxy[:, :2], src_xyxy[:, 2:])],
@@ -558,6 +542,7 @@ class SetCriterion(nn.Module):
         with jt.no_grad():
             losses['loss_xy'] = loss_bbox[..., :2].sum() / num_boxes
             losses['loss_hw'] = loss_bbox[..., 2:].sum() / num_boxes
+
 
         return losses
 
