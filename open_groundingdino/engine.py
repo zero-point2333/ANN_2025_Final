@@ -11,7 +11,6 @@ from typing import Iterable
 import jittor as jt
 import jittor.nn as nn
 
-from util.debug_tools import log_text
 import util.misc as utils
 from datasets.coco_eval import CocoEvaluator
 from datasets.cocogrounding_eval import CocoGroundingEvaluator
@@ -19,11 +18,42 @@ from datasets.cocogrounding_eval import CocoGroundingEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
 
 
+def clip_grad_norm_(parameters, max_norm: float, optimizer=None, eps: float = 1e-6):
+    if max_norm <= 0:
+        return 0.0
+    if hasattr(nn, "clip_grad_norm_"):
+        return nn.clip_grad_norm_(parameters, max_norm)
+    if hasattr(nn, "clip_grad_norm"):
+        return nn.clip_grad_norm(parameters, max_norm)
+    grads = []
+    for p in parameters:
+        g = None
+        if optimizer is not None and hasattr(p, "opt_grad"):
+            try:
+                g = p.opt_grad(optimizer)
+            except Exception:
+                g = None
+        if g is None:
+            continue
+        grads.append(g)
+    if not grads:
+        return 0.0
+    total_norm_sq = jt.zeros((1,), dtype=grads[0].dtype)
+    for g in grads:
+        total_norm_sq = total_norm_sq + jt.sum(g * g)
+    total_norm = jt.sqrt(total_norm_sq)
+    clip_coef = max_norm / (total_norm + eps)
+    clip_coef = jt.minimum(clip_coef, 1.0)
+    for g in grads:
+        g.assign(g * clip_coef)
+    return total_norm
+
+
 def train_one_epoch(model, criterion,
                     data_loader: Iterable, optimizer,
                     epoch: int, max_norm: float = 0, 
                     wo_class_error=False, lr_scheduler=None, args=None, logger=None):
-    
+
     model.train()
     criterion.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -31,25 +61,29 @@ def train_one_epoch(model, criterion,
     if not wo_class_error:
         metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = 'Epoch: [{}]'.format(epoch)
-    print_freq = 1
+    print_freq = 10
 
     _cnt = 0
+    accum_steps = getattr(args, "accumulation_steps", 1)
+    if accum_steps < 1:
+        accum_steps = 1
 
-    for samples, targets in metric_logger.log_every(data_loader, print_freq, header, logger=logger):
+    optimizer.zero_grad()
+    step = -1
+
+    for step, (samples, targets) in enumerate(
+        metric_logger.log_every(data_loader, print_freq, header, logger=logger)
+    ):
 
         captions = [t["caption"] for t in targets]
         cap_list = [t["cap_list"] for t in targets]
         targets = [{k: v for k, v in t.items() if isinstance(v, jt.Var)} for t in targets]
 
-        print("model infer start")
         outputs = model(samples, captions=captions)
-        print("model infer done, criterion infer start")
         loss_dict = criterion(outputs, targets, cap_list, captions)
-        print("criterion infer done")
 
         weight_dict = criterion.weight_dict
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
-        print("losses cal done")
 
         loss_dict_reduced = utils.reduce_dict(loss_dict)
         loss_dict_reduced_unscaled = {f'{k}_unscaled': v
@@ -57,25 +91,22 @@ def train_one_epoch(model, criterion,
         loss_dict_reduced_scaled = {k: v * weight_dict[k]
                                     for k, v in loss_dict_reduced.items() if k in weight_dict}
         losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
-        print("losses_reduced_scaled cal done")
 
         loss_value = losses_reduced_scaled.item()
-        print("losses_value cal done")
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
             print(loss_dict_reduced)
             sys.exit(1)
 
-        assert isinstance(optimizer, jt.optim.AdamW)
-        # 这一行直接完成了 zero_grad, backward 和 step
-        optimizer.step(losses)
-        if max_norm > 0 and hasattr(nn, "utils") and hasattr(nn.utils, "clip_grad_norm_"):
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-        print("optimizer set")
-
-        if args.onecyclelr:
-            lr_scheduler.step()
+        optimizer.backward(losses / accum_steps)
+        if (step + 1) % accum_steps == 0:
+            if max_norm > 0:
+                clip_grad_norm_(model.parameters(), max_norm, optimizer=optimizer)
+            optimizer.step()
+            optimizer.zero_grad()
+            if args.onecyclelr:
+                lr_scheduler.step()
 
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         if 'class_error' in loss_dict_reduced:
@@ -87,6 +118,14 @@ def train_one_epoch(model, criterion,
             if _cnt % 15 == 0:
                 print("BREAK!"*5)
                 break
+
+    if step >= 0 and (step + 1) % accum_steps != 0:
+        if max_norm > 0:
+            clip_grad_norm_(model.parameters(), max_norm, optimizer=optimizer)
+        optimizer.step()
+        optimizer.zero_grad()
+        if args.onecyclelr:
+            lr_scheduler.step()
 
     if getattr(criterion, 'loss_weight_decay', False):
         criterion.loss_weight_decay(epoch=epoch)

@@ -10,6 +10,27 @@ import jittor as jt
 import jittor.nn as nn
 
 
+def _linear_bmm_transpose(x: jt.Var, weight: jt.Var, bias: Optional[jt.Var] = None) -> jt.Var:
+    """
+    Apply a linear projection using bmm_transpose to avoid broadcasted matmul_transpose
+    on large 2D inputs.
+    """
+    x_shape = x.shape
+    if len(x_shape) == 2:
+        out = jt.bmm_transpose(x[None, ...], weight[None, ...])[0]
+        if bias is not None:
+            out = out + bias
+        return out
+    if len(x_shape) == 3:
+        bsz, seq_len, dim = x_shape
+        x2 = x.reshape(bsz * seq_len, dim)
+        out2 = jt.bmm_transpose(x2[None, ...], weight[None, ...])[0]
+        if bias is not None:
+            out2 = out2 + bias
+        return out2.reshape(bsz, seq_len, -1)
+    raise ValueError(f"Unsupported input rank for _linear_bmm_transpose: {x_shape}")
+
+
 class FeatureResizer(nn.Module):
     """
     This class takes as input a set of embeddings of dimension C1 and outputs a set of
@@ -241,8 +262,12 @@ class BiMultiHeadAttention(nn.Module):
         attn_output_l = attn_output_l.transpose(1, 2)
         attn_output_l = attn_output_l.reshape(bsz, src_len, self.embed_dim)
 
-        attn_output_v = self.out_v_proj(attn_output_v)
-        attn_output_l = self.out_l_proj(attn_output_l)
+        attn_output_v = _linear_bmm_transpose(
+            attn_output_v, self.out_v_proj.weight, self.out_v_proj.bias
+        )
+        attn_output_l = _linear_bmm_transpose(
+            attn_output_l, self.out_l_proj.weight, self.out_l_proj.bias
+        )
 
         return attn_output_v, attn_output_l
 
