@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from groundingdino.util.debug_tools import debug_enabled, log_tensor, log_text
+from util.debug_tools import debug_enabled, log_tensor, log_text
 
 def _ensure_jittor_cache_dir() -> None:
     """
@@ -93,11 +93,11 @@ try:
 except Exception:
     torch = None
 
-import groundingdino.datasets.transforms as T
-from groundingdino.models import build_model
-from groundingdino.util.misc import clean_state_dict
-from groundingdino.util.slconfig import SLConfig
-from groundingdino.util.utils import get_phrases_from_posmap
+import datasets.transforms as T
+from models import build_model
+from util.misc import clean_state_dict
+from util.slconfig import SLConfig
+from util.utils import get_phrases_from_posmap
 
 
 def _set_jittor_device(device: str) -> None:
@@ -165,7 +165,7 @@ def _extract_state_dict(ckpt: Any) -> Dict[str, Any]:
 
 def _torch_tensor_to_np(v: Any) -> np.ndarray:
     if torch is not None and isinstance(v, torch.Tensor):
-        arr = v.numpy()
+        arr = v.detach().cpu().numpy()
     else:
         arr = np.asarray(v)
     if not arr.flags["C_CONTIGUOUS"]:
@@ -190,7 +190,11 @@ def _try_load_bert_weights(model: Any, full_state_dict: Dict[str, Any]) -> None:
     try:
         bert_sd_torch = {}
         for k, v in bert_sd.items():
-            if not isinstance(v, jt.Var):
+            if torch.is_tensor(v):
+                bert_sd_torch[k] = v.detach().cpu()
+            elif isinstance(v, jt.Var):
+                bert_sd_torch[k] = torch.from_numpy(v.numpy())
+            else:
                 bert_sd_torch[k] = torch.from_numpy(np.asarray(v))
 
         if hasattr(bert, "load_bert_state_dict"):

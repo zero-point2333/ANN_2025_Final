@@ -82,7 +82,6 @@ def get_args_parser():
     parser.add_argument('--amp', action='store_true',
                         help="Train with mixed precision")
     parser.add_argument("--distributed", default=False, type=bool, help="distributed calculation service")
-    # parser.add_argument("--use_coco_eval", default=False, type=bool, help="use coco evaluation")
     return parser
 
 
@@ -152,7 +151,6 @@ def main(args):
     import torch
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic=True
 
     logger.debug("build model ... ...")
     model, criterion, postprocessors = build_model_main(args)
@@ -176,9 +174,10 @@ def main(args):
         for name, parameter in model.named_parameters():
             for keyword in args.freeze_keywords:
                 if keyword in name:
-                    parameter.requires_grad_(False)
+                    assert isinstance(parameter, jt.Var)
+                    parameter.requires_grad  = False
                     break
-    # logger.info("params after freezing:\n"+json.dumps({n: p.numel() for n, p in model.named_parameters() if p.requires_grad}, indent=2))
+    logger.info("params after freezing:\n"+json.dumps({n: p.numel() for n, p in model.named_parameters() if p.requires_grad}, indent=2))
     logger.info("params num after freezing:"+str(len(model.named_parameters())))
 
     # 使用Jittor的优化器

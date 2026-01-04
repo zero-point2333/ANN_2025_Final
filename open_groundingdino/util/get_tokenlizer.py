@@ -34,7 +34,7 @@ def get_tokenlizer(text_encoder_type):
             if os.path.exists(alt_dir):
                 local_dir = alt_dir
     if not os.path.exists(local_dir):
-        raise EnvironmentError("local model not found!")
+        raise EnvironmentError(f"local model {model_id} not found!")
     
     # 修改：从本地路径加载tokenizer
     tokenizer = AutoTokenizer.from_pretrained(local_dir, local_files_only=True)
@@ -55,8 +55,8 @@ def get_pretrained_language_model(text_encoder_type):
         raise EnvironmentError("local model not found!")
     
     if text_encoder_type == "bert-base-uncased" or (os.path.isdir(text_encoder_type) and os.path.exists(text_encoder_type)):
-        return BertModel.from_pretrained(local_dir, local_files_only=True)
+        return BertModel.from_pretrained(local_dir, local_files_only=True, use_safetensors=False)
     if text_encoder_type == "roberta-base":
-        return RobertaModel.from_pretrained(local_dir, local_files_only=True)
+        return RobertaModel.from_pretrained(local_dir, local_files_only=True, use_safetensors=False)
 
     raise ValueError("Unknown text_encoder_type {}".format(text_encoder_type))

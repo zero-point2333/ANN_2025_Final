@@ -31,24 +31,13 @@ class BertModelWarper(nn.Module):
     def load_bert_state_dict(self, state_dict, strict=False):
         if state_dict is None:
             return None
-        torch = sys.modules.get("torch")
-        if torch is None:
-            import torch  # transformers is torch-based; keep conversion here
-        converted = {}
-        for k, v in state_dict.items():
-            if torch.is_tensor(v):
-                converted[k] = v.detach().cpu()
-            elif isinstance(v, jt.Var):
-                converted[k] = torch.from_numpy(v.numpy())
-            else:
-                converted[k] = torch.as_tensor(v)
-        load_res = self._bert_model.load_state_dict(converted, strict=strict)
+        load_res = self._bert_model.load_state_dict(state_dict, strict=strict)
         try:
             missing = getattr(load_res, "missing_keys", None)
             unexpected = getattr(load_res, "unexpected_keys", None)
             if missing is not None or unexpected is not None:
                 log_text(
-                    f"bert.load_state_dict: keys={len(converted)} "
+                    f"bert.load_state_dict: keys={len(state_dict)} "
                     f"missing={len(missing) if missing is not None else 'n/a'} "
                     f"unexpected={len(unexpected) if unexpected is not None else 'n/a'}"
                 )

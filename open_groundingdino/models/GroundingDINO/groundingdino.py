@@ -108,8 +108,7 @@ class GroundingDINO(nn.Module):
         # bert
         self.tokenizer = get_tokenlizer.get_tokenlizer(text_encoder_type)
         self.bert = get_tokenlizer.get_pretrained_language_model(text_encoder_type)
-        self.bert.pooler.dense.weight.requires_grad_(False)
-        self.bert.pooler.dense.bias.requires_grad_(False)
+        self.bert.pooler.dense.requires_grad_(False)
         self.bert = BertModelWarper(bert_model=self.bert)
 
         self.feat_map = nn.Linear(self.bert.config.hidden_size, self.hidden_dim, bias=True)
@@ -233,13 +232,6 @@ class GroundingDINO(nn.Module):
         # encoder texts
 
         tokenized = self.tokenizer(captions, padding="longest", return_tensors="pt")
-        # Convert tokenizer tensors to Jittor Vars to keep Jittor ops consistent.
-        for key in ("input_ids", "attention_mask", "token_type_ids"):
-            if key in tokenized and not isinstance(tokenized[key], jt.Var):
-                val = tokenized[key]
-                if hasattr(val, "detach") and hasattr(val, "cpu") and hasattr(val, "numpy"):
-                    val = val.detach().cpu().numpy()
-                tokenized[key] = jt.array(val)
         one_hot_token = tokenized
 
         (
@@ -271,12 +263,7 @@ class GroundingDINO(nn.Module):
         print("Bert Done!")
 
         last_hidden_state = bert_output["last_hidden_state"]
-        if isinstance(last_hidden_state, jt.Var):
-            encoded_text = self.feat_map(last_hidden_state)
-        else:
-            if hasattr(last_hidden_state, "detach") and hasattr(last_hidden_state, "cpu") and hasattr(last_hidden_state, "numpy"):
-                last_hidden_state = last_hidden_state.detach().cpu().numpy()
-            encoded_text = self.feat_map(jt.array(last_hidden_state))
+        encoded_text = self.feat_map(last_hidden_state)
         text_token_mask = tokenized.attention_mask.bool()  # bs, 195
         # text_token_mask: True for nomask, False for mask
         # text_self_attention_masks: True for nomask, False for mask
@@ -837,12 +824,7 @@ class SetCriterion(nn.Module):
             tgt_ids_ref = []
             for v in targets:
                 labels = v["labels"]
-                if isinstance(labels, jt.Var):
-                    tgt_ids_ref.append(labels)
-                else:
-                    if hasattr(labels, "detach") and hasattr(labels, "cpu") and hasattr(labels, "numpy"):
-                        labels = labels.detach().cpu().numpy()
-                    tgt_ids_ref.append(jt.array(labels))
+                tgt_ids_ref.append(labels)
                     
             for i in range(len(indices)):
                 current_one_hot = jt.zeros((num_queries, dim), dtype=jt.int64)

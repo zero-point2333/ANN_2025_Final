@@ -12,6 +12,7 @@ import jittor.transform as JTransform
 # 引入 pycocotools 替代 torchvision.datasets.CocoDetection
 from pycocotools.coco import COCO
 
+from groundingdino.datasets.transforms import resize
 from groundingdino.util import box_ops, get_tokenlizer
 from groundingdino.util.inference import _load_checkpoint_any, load_model
 from groundingdino.util.misc import collate_fn
@@ -23,11 +24,10 @@ from groundingdino.datasets.cocogrounding_eval import CocoGroundingEvaluator
 # 1. 自定义且不依赖 Torchvision 的 COCO Dataset
 # ==========================================
 class JittorCocoDetection:
-    def __init__(self, img_folder, ann_file, transforms=None):
+    def __init__(self, img_folder, ann_file):
         self.root = img_folder
         self.coco = COCO(ann_file)
         self.ids = list(sorted(self.coco.imgs.keys()))
-        self.transforms = transforms
         
         # 预定义 Normalize 参数
         self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(3, 1, 1)
@@ -71,48 +71,12 @@ class JittorCocoDetection:
         target_new["boxes"] = boxes
         target_new["orig_size"] = jt.array([int(h), int(w)])
 
-        # ==========================================
-        # 2. 手动实现 Resize 和 Normalize (替代 transforms)
-        # ==========================================
-        # 目标: Resize 短边到 800，最大长边不超过 1333
-        # 这是 GroundingDINO Eval 的标准预处理
-        
-        # 计算缩放比例
-        min_size = 800
-        max_size = 1333
-        
-        im_w, im_h = img.size
-        min_original_size = float(min((im_w, im_h)))
-        max_original_size = float(max((im_w, im_h)))
-        
-        if max_original_size / min_original_size * min_size > max_size:
-            size = int(round(max_size * min_original_size / max_original_size))
-        else:
-            size = min_size
-            
-        if (im_w <= im_h and im_w == size) or (im_h <= im_w and im_h == size):
-            # 不需要 resize
-            new_h, new_w = im_h, im_w
-        else:
-            if im_w < im_h:
-                ow = size
-                oh = int(size * im_h / im_w)
-            else:
-                oh = size
-                ow = int(size * im_w / im_h)
-            
-            # 执行 Resize
-            img = img.resize((ow, oh), Image.BILINEAR)
-            new_w, new_h = ow, oh
-
-        # 将图片转为 Jittor Tensor (C, H, W) 并归一化
-        # PIL -> Numpy (H, W, C) -> Transpose (C, H, W) -> Normalize
-        img_np = np.array(img).astype(np.float32) / 255.0
+        img_res, target_res = resize(img, target_new, 800, 1333)
+        img_np = np.array(img_res).astype(np.float32) / 255.0
         img_np = img_np.transpose((2, 0, 1))
         img_np = (img_np - self.mean) / self.std
-        img_jt = jt.array(img_np)
-
-        return img_jt, target_new
+        img_res = jt.array(img_np)
+        return img_res, target_res
 
 # ==========================================
 # PostProcessor (保持不变，确保 Jittor 语法)
@@ -217,7 +181,7 @@ def main(args):
     # 3. 使用自定义的 Dataset 类 (移除了 Transform 参数，因为逻辑内嵌了)
     # ==========================================
     dataset = JittorCocoDetection(
-        args.image_dir, args.anno_path, transforms=None)
+        args.image_dir, args.anno_path)
 
     # build post processor
     tokenlizer = get_tokenlizer.get_tokenlizer(cfg.text_encoder_type)
@@ -265,10 +229,10 @@ def main(args):
             target["image_id"]: output for target, output in zip(targets, results)}
         evaluator.update(cocogrounding_res)
 
-        if (i+1) % 10 == 0:
+        if (i + 1) % 10 == 0:
             used_time = time.time() - start
-            eta = total / ((i+1) * args.batch_size) * used_time - used_time
-            print(f"processed {i * args.batch_size}/{total} images. time: {used_time:.2f}s")
+            eta = total / ((i + 1) * args.batch_size) * used_time - used_time
+            print(f"processed {(i + 1) * args.batch_size}/{total} images. time: {used_time:.2f}s")
             
     print("all images processed")
 

@@ -1,0 +1,10 @@
+{
+  "val": [
+    {
+      "root": "coco/images",
+      "anno": "coco/annotations/instances_val2017.json",
+      "label_map": null,
+      "dataset_mode": "coco"
+    }
+  ]
+}

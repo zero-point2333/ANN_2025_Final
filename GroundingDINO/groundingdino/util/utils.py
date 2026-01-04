@@ -36,6 +36,8 @@ def clean_state_dict(state_dict):
         # Handle backbone naming difference: backbone.0 -> backbone.backbone
         if k.startswith("backbone.0"):
             k = k.replace("backbone.0", "backbone.backbone", 1)
+        if isinstance(v, jt.Var):
+            new_state_dict[k] = v
         if isinstance(v, torch.Tensor):
             new_state_dict[k] = jt.array(v.detach().cpu().numpy())
         elif isinstance(v, dict):

@@ -1,7 +1,7 @@
 CUDA_VISIBLE_DEVICES=0
 CFG="groundingdino/config/GroundingDINO_SwinT_OGC.py"
 PRETRAIN_MODEL_PATH="weights/groundingdino_swint_ogc.pth"
-ANNO_PATH="coco/annotations/lvis_v1_val.json"
+ANNO_PATH="coco/annotations/lvis_v1_minival_inserted_image_name.json"
 IMAGE_DIR="coco/images"
 OUTPUT_DIR="outputs"
 

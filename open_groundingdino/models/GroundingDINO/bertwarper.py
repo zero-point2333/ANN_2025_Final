@@ -8,6 +8,7 @@ import sys
 
 import jittor as jt
 from jittor import nn
+import torch
 from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
 from transformers import BertModel
 from util.debug_tools import log_text
@@ -108,15 +109,15 @@ class BertModelWarper(nn.Module):
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
         elif input_ids is not None:
-            input_shape = input_ids.shape
+            input_shape = input_ids.size()
             batch_size, seq_length = input_shape
         elif inputs_embeds is not None:
-            input_shape = inputs_embeds.shape[:-1]
+            input_shape = inputs_embeds.size()[:-1]
             batch_size, seq_length = input_shape
         else:
             raise ValueError("You have to specify either input_ids or inputs_embeds")
 
-        # Jittor doesn't have device attribute
+        device = input_ids.device if input_ids is not None else inputs_embeds.device
 
         # past_key_values_length
         past_key_values_length = (
@@ -124,38 +125,26 @@ class BertModelWarper(nn.Module):
         )
 
         if attention_mask is None:
-            attention_mask = jt.ones(
-                (batch_size, seq_length + past_key_values_length)
+            attention_mask = torch.ones(
+                ((batch_size, seq_length + past_key_values_length)), device=device
             )
         if token_type_ids is None:
-            token_type_ids = jt.zeros(input_shape, dtype=jt.int64)
-        import torch
-        def _to_torch(x):
-            if x is None:
-                return None
-            if torch.is_tensor(x):
-                return x
-            if isinstance(x, jt.Var):
-                return torch.from_numpy(x.numpy())
-            return torch.as_tensor(x)
+            token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=device)
+
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
-        attention_mask_pt = _to_torch(attention_mask)
-        extended_attention_mask = self.get_extended_attention_mask(
-            attention_mask_pt, input_shape
+        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(
+            attention_mask, input_shape, device
         )
-        # Ensure attention mask is float32 to match query dtype
-        extended_attention_mask = extended_attention_mask.float()
 
         # If a 2D or 3D attention mask is provided for the cross-attention
         # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
-        encoder_attention_mask_pt = _to_torch(encoder_attention_mask)
         if self.config.is_decoder and encoder_hidden_states is not None:
-            encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.shape
+            encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
             encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
-            if encoder_attention_mask_pt is None:
-                encoder_attention_mask_pt = torch.ones(encoder_hidden_shape)
-            encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask_pt)
+            if encoder_attention_mask is None:
+                encoder_attention_mask = torch.ones(encoder_hidden_shape, device=device)
+            encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)
         else:
             encoder_extended_attention_mask = None
         # if os.environ.get('IPDB_SHILONG_DEBUG', None) == 'INFO':
@@ -166,38 +155,22 @@ class BertModelWarper(nn.Module):
         # attention_probs has shape bsz x n_heads x N x N
         # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
         # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
-        head_mask_pt = _to_torch(head_mask)
-        head_mask = self.get_head_mask(head_mask_pt, self.config.num_hidden_layers)
-        # Convert Jittor inputs to PyTorch tensors for BERT embeddings
-        log_text(f"bert.execute input_ids type={type(input_ids)} attention_mask type={type(attention_mask)}")
-        input_ids_pt = _to_torch(input_ids).long() if input_ids is not None else None
-        position_ids_pt = _to_torch(position_ids).long() if position_ids is not None else None
-        token_type_ids_pt = _to_torch(token_type_ids).long() if token_type_ids is not None else None
-        if token_type_ids_pt is not None:
-            token_type_ids_pt.clamp_(0, max(0, self.config.type_vocab_size - 1))
-        inputs_embeds_pt = _to_torch(inputs_embeds) if inputs_embeds is not None else None
+        head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
+
         embedding_output = self.embeddings(
-            input_ids=input_ids_pt,
-            position_ids=position_ids_pt,
-            token_type_ids=token_type_ids_pt,
-            inputs_embeds=inputs_embeds_pt,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            token_type_ids=token_type_ids,
+            inputs_embeds=inputs_embeds,
             past_key_values_length=past_key_values_length,
         )
 
-        # Convert back to Jittor
-        # embedding_output = jt.array(embedding_output.detach().numpy())
-
-        # Convert attention_mask to PyTorch tensor for encoder
-        extended_attention_mask_pt = extended_attention_mask
-        head_mask_pt = head_mask  # head_mask is already a list from PyTorch method
-        encoder_hidden_states_pt = _to_torch(encoder_hidden_states) if encoder_hidden_states is not None else None
-        encoder_extended_attention_mask_pt = encoder_extended_attention_mask
         encoder_outputs = self.encoder(
             embedding_output,
-            attention_mask=extended_attention_mask_pt,
-            head_mask=head_mask_pt,
-            encoder_hidden_states=encoder_hidden_states_pt,
-            encoder_attention_mask=encoder_extended_attention_mask_pt,
+            attention_mask=extended_attention_mask,
+            head_mask=head_mask,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_extended_attention_mask,
             past_key_values=past_key_values,
             use_cache=use_cache,
             output_attentions=output_attentions,
@@ -205,25 +178,14 @@ class BertModelWarper(nn.Module):
             return_dict=return_dict,
         )
         sequence_output = encoder_outputs[0]
-
-        # # Convert back to Jittor(不需要，函数的返回值统一为pytorch的tensor，后面调用的时候再转换)
-        # sequence_output = jt.array(sequence_output.detach().numpy())
-        
-        # Convert to PyTorch for pooler
-        # sequence_output_pt = torch.from_numpy(sequence_output.numpy())
-        pooled_output_pt = self.pooler(sequence_output) if self.pooler is not None else None
-        
-        # # Convert pooled_output back to Jittor(不需要，函数的返回值统一为pytorch的tensor，后面调用的时候再转换)
-        # pooled_output = jt.array(pooled_output_pt.detach().numpy()) if pooled_output is not None else None
+        pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
 
         if not return_dict:
-            return (sequence_output, pooled_output_pt) + encoder_outputs[1:]
+            return (sequence_output, pooled_output) + encoder_outputs[1:]
 
-        log_text("torch bert model done!")
-        # modify: 这里得到输入应该是pytorch的tensor才对
         return BaseModelOutputWithPoolingAndCrossAttentions(
             last_hidden_state=sequence_output,
-            pooler_output=pooled_output_pt,
+            pooler_output=pooled_output,
             past_key_values=encoder_outputs.past_key_values,
             hidden_states=encoder_outputs.hidden_states,
             attentions=encoder_outputs.attentions,

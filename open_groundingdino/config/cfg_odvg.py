@@ -116,6 +116,6 @@ ema_epoch = 0
 use_detached_boxes_dec_out = False
 use_coco_eval = False
 
-label_list = ["fish","jellyfish","penguins","sharks","puffins","stingrays","starfish"]
+label_list = ["fish","jellyfish","penguin","puffin","shark","starfish","stingray"]
 
 dn_scalar = 100
