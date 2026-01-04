@@ -535,7 +535,8 @@ def get_phrases_from_posmap(
     
     if posmap.ndim == 1:
         posmap[0: left_idx + 1] = False
-        posmap[right_idx:] = False
+        if right_idx < len(posmap):
+            posmap[right_idx:] = False
         non_zero_indices = posmap.nonzero()  # 返回形状为 [num_nonzero, ndim] 的张量
         non_zero_idx = non_zero_indices[:, 0].numpy().tolist()  # 取所有行的第0列（第一个维度的索引）并转换为列表
         

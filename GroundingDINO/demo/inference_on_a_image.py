@@ -206,7 +206,9 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
     if token_spans is None:
         logits_filt = logits.cpu().clone()
         boxes_filt = boxes.cpu().clone()
-        filt_mask = logits_filt.max(dim=1) > box_threshold
+        assert isinstance(logits_filt, jt.Var)
+        logits_filt_max = jt.array(logits_filt.max(dim=1))
+        filt_mask = logits_filt_max > box_threshold
         log_text(f"Overall filt_mask sum: {filt_mask.sum().item()}, box_threshold: {box_threshold}")
         logits_filt = logits_filt[filt_mask]  # num_filt, 256
         boxes_filt = boxes_filt[filt_mask]  # num_filt, 4

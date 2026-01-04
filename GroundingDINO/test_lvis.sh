@@ -4,6 +4,5 @@ PRETRAIN_MODEL_PATH="weights/groundingdino_swint_ogc.pth"
 ANNO_PATH="coco/annotations/lvis_v1_val.json"
 IMAGE_DIR="coco/images"
 OUTPUT_DIR="outputs"
-export JT_SYNC=1
 
 python demo/test_ap_on_lvis.py -c ${CFG} -p ${PRETRAIN_MODEL_PATH} --anno_path ${ANNO_PATH} --image_dir ${IMAGE_DIR} --output_dir ${OUTPUT_DIR}

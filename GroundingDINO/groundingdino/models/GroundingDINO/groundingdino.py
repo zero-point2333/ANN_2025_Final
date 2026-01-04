@@ -101,8 +101,7 @@ class GroundingDINO(nn.Module):
         # init tokenizer
         self.tokenizer = get_tokenlizer.get_tokenlizer(text_encoder_type)
         self.bert = get_tokenlizer.get_pretrained_language_model(text_encoder_type)
-        self.bert.pooler.dense.weight.requires_grad_(False)
-        self.bert.pooler.dense.bias.requires_grad_(False)
+        self.bert.pooler.dense.requires_grad_(False)
         self.bert = BertModelWarper(bert_model=self.bert)
 
         self.feat_map = nn.Linear(self.bert.config.hidden_size, self.hidden_dim, bias=True)
@@ -281,7 +280,6 @@ class GroundingDINO(nn.Module):
         else:
             bert_last_hidden_state = bert_output[0]
         log_tensor("bert.last_hidden_state", bert_last_hidden_state)
-        bert_last_hidden_state = jt.array(bert_last_hidden_state.detach().cpu().numpy())
         assert isinstance(bert_last_hidden_state, jt.Var)
         encoded_text = self.feat_map(bert_last_hidden_state)  # bs, 195, d_model
         text_token_mask = tokenized['attention_mask'].bool()  # bs, 195

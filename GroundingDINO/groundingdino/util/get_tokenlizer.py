@@ -55,7 +55,7 @@ def get_pretrained_language_model(text_encoder_type):
         raise EnvironmentError("local model not found!")
     
     if text_encoder_type == "bert-base-uncased" or (os.path.isdir(text_encoder_type) and os.path.exists(text_encoder_type)):
-        return BertModel.from_pretrained(local_dir, local_files_only=True)
+        return BertModel.from_pretrained(local_dir, local_files_only=True, use_safetensors=False)
     if text_encoder_type == "roberta-base":
         return RobertaModel.from_pretrained(local_dir, local_files_only=True)
 

@@ -28,49 +28,40 @@ from util.misc import NestedTensor, clean_state_dict, is_main_process
 from .position_encoding import PositionEmbeddingLearned, PositionEmbeddingSineHW, build_position_encoding
 from .swin_transformer import build_swin_transformer
 
+import jittor as jt
+from jittor import nn
+
 class FrozenBatchNorm2d(nn.Module):
     """
-    BatchNorm2d where the batch statistics and the affine parameters are fixed.
-
-    Copy-paste from torchvision.misc.ops with added eps before rqsrt,
-    without which any other models than torchvision.models.resnet[18,34,50,101]
-    produce nans.
+    Jittor version of FrozenBatchNorm2d.
+    Fixed: Uses jt.no_grad() to prevent graph overhead for constant calculations.
     """
-
     def __init__(self, n):
         super(FrozenBatchNorm2d, self).__init__()
+        # 初始化参数
         self.weight = jt.ones(n)
         self.bias = jt.zeros(n)
         self.running_mean = jt.zeros(n)
         self.running_var = jt.ones(n)
         
-        # 在Jittor中设置为不计算梯度
+        # 确保这些变量永远不计算梯度
         self.weight.stop_grad()
         self.bias.stop_grad()
         self.running_mean.stop_grad()
         self.running_var.stop_grad()
 
-    def _load_from_state_dict(
-        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
-    ):
-        num_batches_tracked_key = prefix + "num_batches_tracked"
-        if num_batches_tracked_key in state_dict:
-            del state_dict[num_batches_tracked_key]
-
-        super(FrozenBatchNorm2d, self)._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
-        )
-
     def execute(self, x):
-        # move reshapes to the beginning
-        # to make it fuser-friendly
-        w = self.weight.reshape(1, -1, 1, 1)
-        b = self.bias.reshape(1, -1, 1, 1)
-        rv = self.running_var.reshape(1, -1, 1, 1)
-        rm = self.running_mean.reshape(1, -1, 1, 1)
-        eps = 1e-5
-        scale = w * (rv + eps).rsqrt()
-        bias = b - rm * scale
+        # 1. 使用 no_grad 上下文，防止 scale 和 bias 的计算生成无用的计算图节点
+        with jt.no_grad():
+            w = self.weight.reshape(1, -1, 1, 1)
+            b = self.bias.reshape(1, -1, 1, 1)
+            rv = self.running_var.reshape(1, -1, 1, 1)
+            rm = self.running_mean.reshape(1, -1, 1, 1)
+            eps = 1e-5
+            scale = w * (rv + eps).rsqrt()
+            bias = b - rm * scale
+        
+        # 2. 只有这一步涉及输入 x，需要保留在计算图中
         return x * scale + bias
 
 
@@ -114,6 +105,7 @@ class BackboneBase(nn.Module):
         return_interm_indices: list,
     ):
         super().__init__()
+        # 冻结参数逻辑保持不变，这部分是对的
         for name, parameter in backbone.named_parameters():
             if (
                 not train_backbone
@@ -121,7 +113,7 @@ class BackboneBase(nn.Module):
                 and "layer3" not in name
                 and "layer4" not in name
             ):
-                parameter.stop_grad()  # Jittor中使用stop_grad
+                parameter.stop_grad() 
 
         return_layers = {}
         for idx, layer_index in enumerate(return_interm_indices):
@@ -129,19 +121,42 @@ class BackboneBase(nn.Module):
                 {"layer{}".format(5 - len(return_interm_indices) + idx): "{}".format(layer_index)}
             )
 
+        # 假设 IntermediateLayerGetter 已经适配了 Jittor
         self.body = IntermediateLayerGetter(backbone, return_layers=return_layers)
         self.num_channels = num_channels
 
     def execute(self, tensor_list: NestedTensor):
-        tensors = jt.array(tensor_list.tensors)  # Convert numpy to Jittor Var
-        xs = self.body(tensors)
+        # 修改点1：不要随意使用 jt.array() 
+        # 假设 tensor_list.tensors 已经是 Jittor Var (从 DataLoader 出来通常就是)
+        # 如果不确定，可以用 x = tensor_list.tensors; if not isinstance(x, jt.Var): x = jt.array(x)
+        xs = self.body(tensor_list.tensors)
+        
         out: Dict[str, NestedTensor] = {}
         for name, x in xs.items():
             m = tensor_list.mask
             assert m is not None
-            # Jittor的interpolate用法
-            mask = nn.interpolate(jt.array(m).float().unsqueeze(0), size=x.shape[-2:]).bool().squeeze(0)
-            out[name] = NestedTensor(x, mask.numpy())
+            
+            # 修改点2：Mask 的插值与类型转换
+            # 1. 确保 m 是 var 并转为 float (interpolate 需要 float)
+            # 2. unsqueeze(1) 增加 channel 维度: (B, H, W) -> (B, 1, H, W)
+            if not isinstance(m, jt.Var):
+                m = jt.array(m)
+            
+            # 使用 nearest 插值保持 mask 的二值特性
+            mask = nn.interpolate(m.float().unsqueeze(1), size=x.shape[-2:], mode="nearest")
+            
+            # 3. 移除 channel 维度并转回 bool/int
+            mask = mask.squeeze(1).bool()
+            
+            # 修改点3：关键！停止梯度
+            # Mask 只是位置编码的辅助信息，不需要参与反向传播
+            mask = mask.stop_grad()
+            
+            # 修改点4：致命修复！
+            # 绝对不要在这里调用 .numpy()
+            # 必须将 Jittor Var 传给 NestedTensor，以保持计算图连通
+            out[name] = NestedTensor(x, mask)
+            
         return out
 
 

@@ -721,7 +721,7 @@ class TransformerDecoder(nn.Module):
             )  # nq, bs, 256 * 2
 
             # conditional query
-            raw_query_pos: jt.Var = self.ref_point_head(query_sine_embed)  # nq, bs, 256
+            raw_query_pos: jt.Var = self.ref_point_head(query_sine_embed).cpu()  # nq, bs, 256
             pos_scale = self.query_scale(output) if self.query_scale is not None else int(1)
             query_pos: jt.Var = pos_scale * raw_query_pos
             log_text(f"decoder.layer{layer_id}: start")
