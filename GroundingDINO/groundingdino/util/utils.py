@@ -11,7 +11,7 @@ import jittor as jt
 from jittor import nn
 from transformers import AutoTokenizer
 
-from util.slconfig import SLConfig
+from groundingdino.util.slconfig import SLConfig
 
 
 def slprint(x, name="x"):

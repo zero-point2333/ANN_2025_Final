@@ -3,84 +3,84 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-# =======================
-# Device switches
-# (MUST be set before importing groundingdino.util.inference which imports jittor)
-# =======================
-USE_GPU = os.environ.get("JT_USE_CUDA", "1").lower() not in ("0", "false", "no")
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
-os.environ["HF_DATASETS_OFFLINE"] = "1"
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+# # =======================
+# # Device switches
+# # (MUST be set before importing groundingdino.util.inference which imports jittor)
+# # =======================
+# USE_GPU = os.environ.get("JT_USE_CUDA", "1").lower() not in ("0", "false", "no")
+# os.environ["TRANSFORMERS_OFFLINE"] = "1"
+# os.environ["HF_DATASETS_OFFLINE"] = "1"
+# os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-if USE_GPU:
-    # Avoid early CUDA init during import; let Jittor enable later via device="cuda".
-    os.environ.pop("use_cuda", None)
-    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
-    nvcc = os.environ.get("NVCC_PATH") or os.environ.get("nvcc_path") or shutil.which("nvcc")
-    if nvcc:
-        os.environ["nvcc_path"] = nvcc
-    else:
-        os.environ.pop("nvcc_path", None)
-else:
-    os.environ["use_cuda"] = "0"
-    os.environ["nvcc_path"] = ""
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+# if USE_GPU:
+#     # Avoid early CUDA init during import; let Jittor enable later via device="cuda".
+#     os.environ.pop("use_cuda", None)
+#     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+#     nvcc = os.environ.get("NVCC_PATH") or os.environ.get("nvcc_path") or shutil.which("nvcc")
+#     if nvcc:
+#         os.environ["nvcc_path"] = nvcc
+#     else:
+#         os.environ.pop("nvcc_path", None)
+# else:
+#     os.environ["use_cuda"] = "0"
+#     os.environ["nvcc_path"] = ""
+#     os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-# Avoid multiprocess compiler pool (sandbox blocks semaphores)
-os.environ["DISABLE_MULTIPROCESSING"] = "1"
-# Point Jittor at the right pythonX.Y-config so it won't try to compile against system python
-exe_real = os.path.realpath(sys.executable)
-py_config = os.path.join(os.path.dirname(exe_real), f"python{sys.version_info.major}.{sys.version_info.minor}-config")
-os.environ.setdefault("python_config_path", py_config)
+# # Avoid multiprocess compiler pool (sandbox blocks semaphores)
+# os.environ["DISABLE_MULTIPROCESSING"] = "1"
+# # Point Jittor at the right pythonX.Y-config so it won't try to compile against system python
+# exe_real = os.path.realpath(sys.executable)
+# py_config = os.path.join(os.path.dirname(exe_real), f"python{sys.version_info.major}.{sys.version_info.minor}-config")
+# os.environ.setdefault("python_config_path", py_config)
 # Enable verbose NaN/Inf diagnostics
 os.environ.setdefault("GROUNDINGDINO_DEBUG_NAN", "1")
 
-def _prefer_cuda_cache_path():
-    if not USE_GPU:
-        return
-    try:
-        import sysconfig
-        import jittor_utils as jit_utils
-        base_cache = jit_utils.find_cache_path()
-        ext = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
-        # If a CPU core exists in the base cache, drop it from sys.path to avoid importing it.
-        if any(name.startswith("jittor_core") and name.endswith(ext) for name in os.listdir(base_cache)):
-            sys.path = [p for p in sys.path if p != base_cache]
+# def _prefer_cuda_cache_path():
+#     if not USE_GPU:
+#         return
+#     try:
+#         import sysconfig
+#         import jittor_utils as jit_utils
+#         base_cache = jit_utils.find_cache_path()
+#         ext = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
+#         # If a CPU core exists in the base cache, drop it from sys.path to avoid importing it.
+#         if any(name.startswith("jittor_core") and name.endswith(ext) for name in os.listdir(base_cache)):
+#             sys.path = [p for p in sys.path if p != base_cache]
 
-        cu_dirs = []
-        for name in os.listdir(base_cache):
-            if name.startswith("cu") and os.path.isdir(os.path.join(base_cache, name)):
-                cu_dirs.append(name)
-        if not cu_dirs:
-            return
-        prefer = os.environ.get("cuda_arch")
-        if prefer in cu_dirs:
-            chosen = prefer
-        else:
-            def _ver_key(name: str):
-                v = name[2:].split("_sm_")[0]
-                parts = []
-                for chunk in v.replace("_", ".").split("."):
-                    if chunk.isdigit():
-                        parts.append(int(chunk))
-                return parts
-            chosen = max(cu_dirs, key=_ver_key)
-        cand = os.path.join(base_cache, chosen)
-        core = os.path.join(cand, "jittor_core" + ext)
-        if os.path.isfile(core) and cand not in sys.path:
-            sys.path.insert(0, cand)
-    except Exception:
-        # best effort; fall back to default import behavior
-        pass
+#         cu_dirs = []
+#         for name in os.listdir(base_cache):
+#             if name.startswith("cu") and os.path.isdir(os.path.join(base_cache, name)):
+#                 cu_dirs.append(name)
+#         if not cu_dirs:
+#             return
+#         prefer = os.environ.get("cuda_arch")
+#         if prefer in cu_dirs:
+#             chosen = prefer
+#         else:
+#             def _ver_key(name: str):
+#                 v = name[2:].split("_sm_")[0]
+#                 parts = []
+#                 for chunk in v.replace("_", ".").split("."):
+#                     if chunk.isdigit():
+#                         parts.append(int(chunk))
+#                 return parts
+#             chosen = max(cu_dirs, key=_ver_key)
+#         cand = os.path.join(base_cache, chosen)
+#         core = os.path.join(cand, "jittor_core" + ext)
+#         if os.path.isfile(core) and cand not in sys.path:
+#             sys.path.insert(0, cand)
+#     except Exception:
+#         # best effort; fall back to default import behavior
+#         pass
 
-_prefer_cuda_cache_path()
+# _prefer_cuda_cache_path()
 
 from groundingdino.util.inference import load_model, load_image, predict
 
 # Extra safety after import
 import jittor as jt
-if not USE_GPU:
-    jt.flags.use_cuda = 0
+# if not USE_GPU:
+#     jt.flags.use_cuda = 0
 print("JT use_cuda =", jt.flags.use_cuda, flush=True)
 
 def _resolve_data_path(rel_dir: str, filename: str, env_key: str) -> str:
@@ -151,7 +151,8 @@ def _annotate_image(image_source, boxes, logits, phrases) -> Image.Image:
         draw.text((x1 + 2, max(0.0, y1 - 12)), label, fill=color)
     return img
 
-device = "cuda" if USE_GPU else "cpu"
+device = "cuda"
+# device = "cuda" if USE_GPU else "cpu"
 checkpoint_path = _resolve_data_path(
     "weights",
     "groundingdino_swint_ogc.pth",

@@ -185,8 +185,7 @@ def main(args):
     start = time.time()
     total = len(dataset)
     print("Dataset length:", total)
-    for i, (images, targets) in enumerate(_iter_batches(dataset, batch_size=1)):
-        print("inferring image")
+    for i, (images, targets) in enumerate(_iter_batches(dataset, batch_size=10)):
         # get images and captions
         bs = images.tensors.shape[0]
         input_captions = [caption] * bs
@@ -201,7 +200,7 @@ def main(args):
         cocogrounding_res = {
             target["image_id"]: output for target, output in zip(targets, results)}
         evaluator.update(cocogrounding_res)
-        print(f"inferred {i}-th image")
+        print(f"inferred {i}-th batch")
 
         if (i+1) % 30 == 0:
             used_time = time.time() - start

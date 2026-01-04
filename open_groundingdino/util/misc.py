@@ -267,76 +267,71 @@ def _max_by_axis(the_list: List[List[int]]) -> List[int]:
 class NestedTensor(object):
     """
     Wrapper for a batched tensor and an associated mask.
-
-    Jittor port note:
-        Internally we store tensors and masks as numpy arrays to avoid
-        hard-binding to any tensor framework. Jittor modules can accept
-        numpy arrays directly and convert them to jt.Var when needed.
+    
+    Jittor Optimization Note:
+    We MUST store data as jt.Var to maintain the computational graph.
+    Storing as numpy (as in the original code) will break autograd and cause OOM.
     """
 
-    def __init__(self, tensors, mask: Optional[np.ndarray] = "auto"):
-        # tensors: numpy array of shape (B, C, H, W) or (C, H, W)
+    def __init__(self, tensors, mask: Optional[jt.Var] = "auto"):
+        # 1. 强制转换为 jt.Var，确保在计算图中
+        if not isinstance(tensors, jt.Var):
+            tensors = jt.array(tensors)
         self.tensors = tensors
-        self.mask = mask
-
-        if isinstance(self.mask, str) and self.mask == "auto":
-            # Automatically build a "no padding" mask
+        
+        # 2. Mask 处理
+        if isinstance(mask, str) and mask == "auto":
+            # 自动构建 "全0 (无padding)" mask
             if self.tensors.ndim == 3:
                 _, h, w = self.tensors.shape
-                self.mask = np.zeros((h, w), dtype=bool)
+                # mask 不需要梯度，必须 stop_grad
+                self.mask = jt.zeros((h, w)).bool().stop_grad()
             elif self.tensors.ndim == 4:
                 b, _, h, w = self.tensors.shape
-                self.mask = np.zeros((b, h, w), dtype=bool)
+                self.mask = jt.zeros((b, h, w)).bool().stop_grad()
             else:
-                raise ValueError(
-                    f"tensors dim must be 3 or 4 but got {self.tensors.ndim} ({self.tensors.shape})"
-                )
+                raise ValueError(f"tensors dim must be 3 or 4 but got {self.tensors.ndim}")
+        else:
+            # 如果传入了 mask
+            if mask is not None:
+                if not isinstance(mask, jt.Var):
+                    mask = jt.array(mask)
+                # 关键：确保 mask 不带梯度
+                self.mask = mask.stop_grad()
+            else:
+                self.mask = None
 
     def imgsize(self):
-        """Return a list of [H, W] for each image, inferred from the mask."""
-        if self.tensors.ndim != 4:
-            raise ValueError("imgsize only defined for batched (B, C, H, W) tensors")
+        """
+        Return a list of [H, W] for each image.
+        Uses jittor ops to avoid sync, but returns python list for compatibility.
+        """
         res = []
+        if self.tensors.ndim != 4:
+             raise ValueError("imgsize only defined for batched (B, C, H, W) tensors")
+        
+        # mask: True 表示 padding
+        # inv: True 表示 valid pixel
+        # 注意：这里 mask 已经是 stop_grad 的了，运算安全
+        
+        # 为了获取具体的数值（通常用于后续逻辑判断），这里可能需要同步一次
+        # 但通常 imgsize 是在后处理阶段用的，所以 sync 影响不大
+        # 如果是在 Loss 计算中用到，最好避免 .item()
+        
         for i in range(self.tensors.shape[0]):
-            mask_i = self.mask[i]  # (H, W) bool, True = padding
-            inv = ~mask_i
-            # sum along axes to find extents of non-padding region
-            maxH = int(inv.sum(axis=0).max())
-            maxW = int(inv.sum(axis=1).max())
-            res.append(np.array([maxH, maxW], dtype=np.float32))
+            mask_i = self.mask[i] 
+            inv = ~mask_i # False = padding
+            
+            # 使用 Jittor 算子计算高宽
+            maxH = inv.sum(dim=0).max().item() # .item() 会触发同步，但在后处理中通常是必要的
+            maxW = inv.sum(dim=1).max().item()
+            res.append([int(maxH), int(maxW)])
+            
         return res
 
     def to(self, device):
-        """
-        For compatibility with the original PyTorch API:
-        in Jittor we do not move data by device string here, so this is a no-op.
-        """
+        # Jittor 自动管理设备，此函数仅为了兼容 API
         return self
-
-    def to_img_list_single(self, tensor, mask):
-        assert tensor.ndim == 3, f"dim of tensor should be 3 but {tensor.ndim}"
-        inv = ~mask
-        maxH = int(inv.sum(axis=0).max())
-        maxW = int(inv.sum(axis=1).max())
-        img = tensor[:, :maxH, :maxW]
-        return img
-
-    def to_img_list(self):
-        """Remove padding and convert to (a list of) CHW numpy arrays."""
-        if self.tensors.ndim == 3:
-            return self.to_img_list_single(self.tensors, self.mask)
-        else:
-            res = []
-            for i in range(self.tensors.shape[0]):
-                tensor_i = self.tensors[i]
-                mask_i = self.mask[i]
-                res.append(self.to_img_list_single(tensor_i, mask_i))
-            return res
-
-    @property
-    def device(self):
-        # Kept for API compatibility; underlying storage is numpy.
-        return "cpu"
 
     def decompose(self):
         return self.tensors, self.mask
@@ -347,52 +342,95 @@ class NestedTensor(object):
     @property
     def shape(self):
         return {"tensors.shape": self.tensors.shape, "mask.shape": self.mask.shape}
+    
+    # 兼容性属性
+    @property
+    def device(self):
+        return "cuda" if jt.flags.use_cuda else "cpu"
+
+
+def _max_by_axis(the_list):
+    # type: (List[List[int]]) -> List[int]
+    maxes = the_list[0]
+    for sublist in the_list[1:]:
+        for index, item in enumerate(sublist):
+            maxes[index] = max(maxes[index], item)
+    return maxes
 
 
 def nested_tensor_from_tensor_list(tensor_list: List):
     """
-    Build a NestedTensor from a list of CHW arrays / tensors.
-
-    Inputs can be:
-        - numpy arrays, or
-        - jt.Var with .numpy() method
+    Build a NestedTensor from a list of CHW tensors.
+    
+    This function usually runs in the DataLoader collate_fn.
+    We build the batch as jt.Var directly.
     """
     if len(tensor_list) == 0:
         raise ValueError("tensor_list must be non-empty")
 
-    # Convert everything to numpy arrays
-    np_list = []
-    for img in tensor_list:
-        if isinstance(img, np.ndarray):
-            np_img = img
-        elif isinstance(img, jt.Var):
-            np_img = img.numpy()
-        elif hasattr(img, "detach") and hasattr(img, "cpu") and hasattr(img, "numpy"):
-            np_img = img.detach().cpu().numpy()
-        else:
-            # fall back to numpy.asarray
-            np_img = np.asarray(img)
-        if np_img.ndim != 3:
-            raise ValueError(f"Expected 3D CHW array, got shape {np_img.shape}")
-        np_list.append(np_img)
-
-    if np_list[0].ndim == 3:
-        max_size = _max_by_axis([list(img.shape) for img in np_list])  # [C, H, W]
-        batch_shape = [len(np_list)] + max_size
-        b, c, h, w = batch_shape
-        dtype = np_list[0].dtype
-
-        tensor = np.zeros(batch_shape, dtype=dtype)
-        mask = np.ones((b, h, w), dtype=bool)  # True = padding
-
-        for i, (img, pad_img, m) in enumerate(zip(np_list, tensor, mask)):
-            c_i, h_i, w_i = img.shape
-            pad_img[:c_i, :h_i, :w_i] = img
-            m[:h_i, :w_i] = False  # False = valid
+    # 1. 统一转为 Jittor Var 来获取 shape，或者直接读取 shape
+    # 为了效率，我们先读取 shape，不要急着把所有数据塞进 GPU
+    
+    # 假设输入可能是 numpy, jt.Var, 或其他
+    # 先探测第一个元素的属性
+    if isinstance(tensor_list[0], jt.Var):
+        # 如果已经是 Var (比如在模型内部调用)，直接处理
+        # 这种情况比较少见，通常 tensor_list 是 list of Vars
+        # 我们需要先看看 shape
+        shapes = [list(img.shape) for img in tensor_list]
+        dtype = tensor_list[0].dtype
     else:
+        # 如果是 numpy (DataLoader 中常见)
+        # 保持 numpy 操作直到最后一步，这样最快
+        np_list = [np.array(img) for img in tensor_list]
+        shapes = [list(img.shape) for img in np_list]
+        dtype = "float32" # 默认
+
+    # 检查维度
+    if len(shapes[0]) != 3:
         raise ValueError("Only 3D CHW tensors are supported")
 
-    return NestedTensor(tensor, mask)
+    # 计算最大尺寸 (C, H, W)
+    max_size = _max_by_axis(shapes)
+    batch_shape = [len(tensor_list)] + max_size
+    b, c, h, w = batch_shape
+
+    # 2. 构建 Batch Tensor 和 Mask
+    # 策略：如果输入是 numpy，我们在 CPU (numpy) 上拼好，然后一次性转 Jittor
+    # 这样比在 Jittor 上创建 huge zeros 然后循环赋值要快，且显存碎片少
+    
+    if isinstance(tensor_list[0], jt.Var):
+        # 如果输入已经是 Jittor Var，我们必须在 Jittor 上操作以保持图连接（如果需要的话）
+        # 或者在 DataLoader 中，这里其实是创建新的叶子节点
+        
+        batch_tensor = jt.zeros(batch_shape, dtype=dtype)
+        batch_mask = jt.ones((b, h, w), dtype="bool") # 1 = padding
+        
+        for i, img in enumerate(tensor_list):
+            c_i, h_i, w_i = img.shape
+            # Jittor 的切片赋值
+            batch_tensor[i, :c_i, :h_i, :w_i] = img
+            batch_mask[i, :h_i, :w_i] = False # 0 = valid
+            
+        # Mask 必须切断梯度
+        batch_mask = batch_mask.stop_grad()
+        
+    else:
+        # 输入是 Numpy (推荐路径 for DataLoader)
+        # 先在 numpy 上拼，快且省显存
+        batch_numpy = np.zeros(batch_shape, dtype=np.float32)
+        mask_numpy = np.ones((b, h, w), dtype=bool)
+        
+        for i, img in enumerate(np_list):
+            c_i, h_i, w_i = img.shape
+            batch_numpy[i, :c_i, :h_i, :w_i] = img
+            mask_numpy[i, :h_i, :w_i] = False
+            
+        # 一次性转 Jittor
+        batch_tensor = jt.array(batch_numpy)
+        batch_mask = jt.array(mask_numpy).stop_grad() # 显式 stop_grad
+
+    return NestedTensor(batch_tensor, batch_mask)
 
 
 def setup_for_distributed(is_master):

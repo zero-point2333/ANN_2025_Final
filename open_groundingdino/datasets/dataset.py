@@ -11,9 +11,12 @@ class TSVDataset(Dataset):
     """ TSV dataset for ImageNet 1K training
     """    
     def __init__(self, tsv_file, transform=None, target_transform=None):
+        super().__init__()  # 【修改1】调用父类初始化，非常重要！
         self.tsv = TSVFile(tsv_file)
         self.transform = transform
         self.target_transform = target_transform
+        # 【修改2】显式设置 total_len，Jittor 内部依赖这个属性来计算 batch
+        self.total_len = self.tsv.num_rows()
 
     def __getitem__(self, index):
         """

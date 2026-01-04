@@ -226,7 +226,7 @@ class SimpleMinsumMatcher(nn.Module):
         for i, (c_tensor, count) in enumerate(zip(C_split, sizes)):
             # 3.1 检查单张图是否没有目标
             if count == 0:
-                # log_text(f"[Matcher Info] Batch index {i} has NO targets. Skipping assignment.")
+                log_text(f"[Matcher Info] Batch index {i} has NO targets. Skipping assignment.")
                 indices.append((np.array([], dtype=np.int64), np.array([], dtype=np.int64)))
                 continue
 

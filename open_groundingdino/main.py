@@ -198,6 +198,7 @@ def main(args):
         logger.debug(f'number of training dataset: {num_of_dataset_train}, samples: {len(dataset_train)}')
 
     dataset_val = build_dataset(image_set='val', args=args, datasetinfo=dataset_meta["val"][0])
+    
 
     sampler_val = SequentialSampler(dataset_val)
     if not args.eval:
@@ -246,7 +247,8 @@ def main(args):
 
         if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer'])
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+            if 'last_epoch' in checkpoint['lr_scheduler']:
+                lr_scheduler.last_epoch = checkpoint['lr_scheduler']['last_epoch']
             args.start_epoch = checkpoint['epoch'] + 1
 
     if (not args.resume) and args.pretrain_model_path:
@@ -308,10 +310,11 @@ def main(args):
             if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % args.save_checkpoint_interval == 0:
                 checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
             for checkpoint_path in checkpoint_paths:
+                scheduler_state = {'last_epoch': lr_scheduler.last_epoch} if hasattr(lr_scheduler, 'last_epoch') else {}
                 weights = {
                     'model': model_without_ddp.state_dict(),
                     'optimizer': optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
+                    'lr_scheduler': scheduler_state,
                     'epoch': epoch,
                     'args': args,
                 }
@@ -328,10 +331,11 @@ def main(args):
         _isbest = best_map_holder.update(map_regular, epoch, is_ema=False)
         if _isbest:
             checkpoint_path = output_dir / 'checkpoint_best_regular.pth'
+            scheduler_state = {'last_epoch': lr_scheduler.last_epoch} if hasattr(lr_scheduler, 'last_epoch') else {}
             utils.save_on_master({
                 'model': model_without_ddp.state_dict(),
                 'optimizer': optimizer.state_dict(),
-                'lr_scheduler': lr_scheduler.state_dict(),
+                'lr_scheduler': scheduler_state,
                 'epoch': epoch,
                 'args': args,
             }, checkpoint_path)
@@ -362,7 +366,7 @@ def main(args):
                         filenames.append(f'{epoch:03}.pth')
                     for name in filenames:
                         jt.save(coco_evaluator.coco_eval["bbox"].eval,
-                                output_dir / "eval" / name)
+                                str(output_dir / "eval" / name))
     
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))

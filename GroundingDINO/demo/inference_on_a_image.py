@@ -5,28 +5,28 @@ import sys
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-# =======================
-# CPU-only hard switches
-# (MUST be set before importing groundingdino.util.inference which imports jittor)
-# =======================
-CPU_ONLY_FLAG = "--cpu-only" in sys.argv
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
-os.environ["HF_DATASETS_OFFLINE"] = "1"
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+# # =======================
+# # CPU-only hard switches
+# # (MUST be set before importing groundingdino.util.inference which imports jittor)
+# # =======================
+CPU_ONLY_FLAG = "--cpu-only" in sys.argv # judgment, only for observation, not a setting
+# os.environ["TRANSFORMERS_OFFLINE"] = "1"
+# os.environ["HF_DATASETS_OFFLINE"] = "1"
+# os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-# 1) Tell Jittor "do NOT use cuda" via flag-style env var
-if CPU_ONLY_FLAG:
-    os.environ["use_cuda"] = "0"
-    # 2) Prevent CUDA toolchain auto-enable / auto-download
-    os.environ["nvcc_path"] = ""
-    # 3) Hide GPUs from CUDA runtime (use empty string; avoid -1 which can be quirky)
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
-# 4) Avoid multiprocess compiler pool (sandbox blocks semaphores)
-os.environ["DISABLE_MULTIPROCESSING"] = "1"
-# 5) Point Jittor at the right pythonX.Y-config so it won't try to compile against system python
-exe_real = os.path.realpath(sys.executable)
-py_config = os.path.join(os.path.dirname(exe_real), f"python{sys.version_info.major}.{sys.version_info.minor}-config")
-os.environ.setdefault("python_config_path", py_config)
+# # 1) Tell Jittor "do NOT use cuda" via flag-style env var
+# if CPU_ONLY_FLAG:
+#     os.environ["use_cuda"] = "0"
+#     # 2) Prevent CUDA toolchain auto-enable / auto-download
+#     os.environ["nvcc_path"] = ""
+#     # 3) Hide GPUs from CUDA runtime (use empty string; avoid -1 which can be quirky)
+#     os.environ["CUDA_VISIBLE_DEVICES"] = ""
+# # 4) Avoid multiprocess compiler pool (sandbox blocks semaphores)
+# os.environ["DISABLE_MULTIPROCESSING"] = "1"
+# # 5) Point Jittor at the right pythonX.Y-config so it won't try to compile against system python
+# exe_real = os.path.realpath(sys.executable)
+# py_config = os.path.join(os.path.dirname(exe_real), f"python{sys.version_info.major}.{sys.version_info.minor}-config")
+# os.environ.setdefault("python_config_path", py_config)
 # Enable verbose NaN/Inf diagnostics
 os.environ.setdefault("GROUNDINGDINO_DEBUG_NAN", "1")
 

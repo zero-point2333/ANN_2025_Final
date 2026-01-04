@@ -1,25 +1,27 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 """
 COCO dataset which returns image_id for evaluation.
-
-Mostly copy-paste from https://github.com/pytorch/vision/blob/13b35ff/references/detection/coco_utils.py
 """
-if __name__=="__main__":
-    # for debug only
-    import os, sys
-    sys.path.append(os.path.dirname(sys.path[0]))
-from jittor.dataset import Dataset
-
-import jittor as jt
-import random
 import os
+import sys
+import json
+from pathlib import Path
+import random
+from typing import Any, Callable, List, Optional, Tuple
 
 from PIL import Image
+import numpy as np
+
+# 替换 torch 为 jittor
+import jittor as jt
+from jittor.dataset import Dataset
 
 from pycocotools import mask as coco_mask
+from pycocotools.coco import COCO
 
 from datasets.data_util import preparing_dataset
 import datasets.transforms as T
+# 假设 box_ops 已经修改为适配 jittor
 from util.box_ops import box_cxcywh_to_xyxy, box_iou
 
 __all__ = ['build']
@@ -32,8 +34,10 @@ class label2compat():
 
     def __call__(self, target, img=None):
         labels = target['labels']
+        # torch.zeros -> jt.zeros
         res = jt.zeros(labels.shape, dtype=labels.dtype)
         for idx, item in enumerate(labels):
+            # item.item() 在 jittor var 中也可用
             res[idx] = self.category_map[item.item()] - 1
         target['label_compat'] = res
         if img is not None:
@@ -55,13 +59,13 @@ class label_compat2onehot():
         if self.num_output_objs == 1:
             res = jt.zeros(self.num_class)
             for i in labels:
-                itm = i.item()
+                itm = int(i.item())
                 res[itm] = 1.0
         else:
             # compat with baseline
             res = jt.zeros(self.num_class, self.num_output_objs)
             for i in labels:
-                itm = i.item()
+                itm = int(i.item())
                 res[itm][place_dict[itm]] = 1.0
                 place_dict[itm] += 1
         target['label_compat_onehot'] = res
@@ -78,8 +82,8 @@ class box_label_catter():
     def __call__(self, target, img=None):
         labels = target['label_compat']
         boxes = target['boxes']
-        assert isinstance(labels, jt.Var)
-        box_label = jt.concat((boxes, labels.unsqueeze(-1)), 1)
+        # torch.cat -> jt.cat
+        box_label = jt.cat((boxes, labels.unsqueeze(-1)), dim=1)
         target['box_label'] = box_label
         if img is not None:
             return target, img
@@ -117,28 +121,20 @@ class RandomSelectBoxlabels():
         self.prob_stop_sign = prob_stop_sign
         
 
-    def sample_for_pred_first_item(self, box_label: jt.Var):
-        print(box_label.dtype())
-        assert isinstance(box_label, jt.Var) and box_label.dtype() == "float32"
-        raise AssertionError
-        box_label_known = jt.array(0, 5)
+    def sample_for_pred_first_item(self, box_label):
+        box_label_known = jt.zeros((0,5))
         box_label_unknown = box_label
         return box_label_known, box_label_unknown
 
-    def sample_for_pred_random_item(self, box_label: jt.Var):
-        print(box_label.dtype())
-        assert isinstance(box_label, jt.Var) and box_label.dtype() == "float32"
-        raise AssertionError
+    def sample_for_pred_random_item(self, box_label):
         n_select = int(random.random() * box_label.shape[0])
+        # jt.randperm
         box_label = box_label[jt.randperm(box_label.shape[0])]
         box_label_known = box_label[:n_select]
         box_label_unknown = box_label[n_select:]
         return box_label_known, box_label_unknown
 
-    def sample_for_pred_last_item(self, box_label: jt.Var):
-        print(box_label.dtype())
-        assert isinstance(box_label, jt.Var) and box_label.dtype() == "float32"
-        raise AssertionError
+    def sample_for_pred_last_item(self, box_label):
         box_label_perm = box_label[jt.randperm(box_label.shape[0])]
         known_label_list = []
         box_label_known = []
@@ -151,15 +147,13 @@ class RandomSelectBoxlabels():
                 # first item
                 box_label_unknown.append(item)
                 known_label_list.append(label_i)
-        box_label_known = jt.stack(box_label_known) if len(box_label_known) > 0 else jt.array(0, 5)
-        box_label_unknown = jt.stack(box_label_unknown) if len(box_label_unknown) > 0 else jt.array(0, 5)
+        
+        box_label_known = jt.stack(box_label_known) if len(box_label_known) > 0 else jt.zeros((0,5))
+        box_label_unknown = jt.stack(box_label_unknown) if len(box_label_unknown) > 0 else jt.zeros((0,5))
         return box_label_known, box_label_unknown
 
-    def sample_for_pred_stop_sign(self, box_label: jt.Var):
-        print(box_label.dtype())
-        assert isinstance(box_label, jt.Var) and box_label.dtype() == "float32"
-        raise AssertionError
-        box_label_unknown = jt.Var(0, 5)
+    def sample_for_pred_stop_sign(self, box_label):
+        box_label_unknown = jt.zeros((0,5))
         box_label_known = box_label
         return box_label_known, box_label_unknown
 
@@ -191,9 +185,8 @@ class RandomDrop():
 
     def __call__(self, target, img=None):
         known_box = target['box_label_known']
-        num_known_box = known_box.size(0)
+        num_known_box = known_box.shape[0]
         idxs = jt.rand(num_known_box)
-        # indices = torch.randperm(num_known_box)[:int((1-self).p*num_known_box + 0.5 + random.random())]
         target['box_label_known'] = known_box[idxs > self.p]
         return target, img
 
@@ -219,11 +212,18 @@ class BboxPertuber():
             if self.idx + K > self.generate_samples:
                 self.idx = 0
             delta = self.samples[self.idx: self.idx + K, :]
-            known_box_pertube[:, :4] = known_box[:, :4] + delta[:, :4]
-            iou = (jt.diag(box_iou(box_cxcywh_to_xyxy(known_box[:, :4]), box_cxcywh_to_xyxy(known_box_pertube[:, :4]))[0])) * (1 + delta[:, -1])
-            assert isinstance(known_box_pertube, jt.Var)
-            known_box_pertube[:, 4] = jt.copy(iou)
-            known_box_pertube[:, -1] = jt.copy(known_box[:, -1])
+            
+            # 使用副本进行计算避免 inplace 问题
+            new_box = known_box[:, :4] + delta[:, :4]
+            known_box_pertube[:, :4] = new_box
+            
+            # jt.diag 类似 torch.diag
+            iou_diag = jt.diag(box_iou(box_cxcywh_to_xyxy(known_box[:, :4]), box_cxcywh_to_xyxy(known_box_pertube[:, :4]))[0])
+            iou = iou_diag * (1 + delta[:, -1])
+            
+            # Jittor 不支持 .copy_()，使用切片赋值
+            known_box_pertube[:, 4] = iou
+            known_box_pertube[:, -1] = known_box[:, -1]
 
         target['box_label_known_pertube'] = known_box_pertube
         return target, img
@@ -236,23 +236,26 @@ class RandomCutout():
     def __call__(self, target, img=None):
         unknown_box = target['box_label_unknown']           # Ku, 5
         known_box = target['box_label_known_pertube']       # Kk, 6
-        Ku = unknown_box.size(0)
+        Ku = unknown_box.shape[0]
 
-        known_box_add = jt.zeros(Ku, 6) # Ku, 6
+        known_box_add = jt.zeros((Ku, 6)) # Ku, 6
         known_box_add[:, :5] = unknown_box
-        jt.init.uniform_(known_box_add[:, 5], 0.5, 1) 
         
+        # uniform_ -> jt.init.uniform (但通常直接创建新的随机变量赋值)
+        # known_box_add[:, 5] = jt.rand(Ku).uniform(0.5, 1) # Jittor 没有直接的 uniform_
+        known_box_add[:, 5] = jt.rand(Ku) * 0.5 + 0.5 # 映射到 0.5-1.0
+        
+        offset = known_box_add[:, 2:4] * (jt.rand(Ku, 2) - 0.5) / 2
+        known_box_add[:, :2] = known_box_add[:, :2] + offset
+        known_box_add[:, 2:4] = known_box_add[:, 2:4] / 2
 
-        known_box_add[:, :2] += known_box_add[:, 2:4] * (jt.rand(Ku, 2) - 0.5) / 2
-        known_box_add[:, 2:4] /= 2
-
-        target['box_label_known_pertube'] = jt.concat((known_box, known_box_add))
+        target['box_label_known_pertube'] = jt.cat((known_box, known_box_add), dim=0)
         return target, img
 
 
 class RandomSelectBoxes():
     def __init__(self, num_class=80) -> None:
-        Warning("This is such a slow function and will be deprecated soon!!!")
+        print("Warning: This is such a slow function and will be deprecated soon!!!")
         self.num_class = num_class
 
     def __call__(self, target, img=None):
@@ -262,25 +265,22 @@ class RandomSelectBoxes():
         # transform to list of tensors
         boxs_list = [[] for i in range(self.num_class)]
         for idx, item in enumerate(boxes):
-            label = labels[idx].item()
+            label = int(labels[idx].item())
             boxs_list[label].append(item)
-        boxs_list_tensor = [jt.stack(i) if len(i) > 0 else jt.array(0,4) for i in boxs_list]
+            
+        boxs_list_tensor = [jt.stack(i) if len(i) > 0 else jt.zeros((0,4)) for i in boxs_list]
 
         # random selection
         box_known = []
         box_unknown = []
         for idx, item in enumerate(boxs_list_tensor):
             ncnt = item.shape[0]
-            nselect = int(random.random() * ncnt) # close in both sides, much faster than random.randint
+            nselect = int(random.random() * ncnt) 
 
             item = item[jt.randperm(ncnt)]
-            # random.shuffle(item)
             box_known.append(item[:nselect])
             box_unknown.append(item[nselect:])
 
-        # box_known_tensor = [torch.stack(i) if len(i) > 0 else torch.Tensor(0,4) for i in box_known]
-        # box_unknown_tensor = [torch.stack(i) if len(i) > 0 else torch.Tensor(0,4) for i in box_unknown]
-        # print('box_unknown_tensor:', box_unknown_tensor)
         target['known_box'] = box_known
         target['unknown_box'] = box_unknown
         return target, img
@@ -304,21 +304,17 @@ class MaskCrop():
     def __call__(self, target, img):
         known_box = target['known_box']
         h,w = img.shape[1:] # h,w
-        # imgsize = target['orig_size'] # h,w
 
-        scale = jt.array([w, h, w, h])
+        scale = jt.Var([w, h, w, h])
 
-        # _cnt = 0
         for boxes in known_box:
             if boxes.shape[0] == 0:
                 continue
             box_xyxy = box_cxcywh_to_xyxy(boxes) * scale
             for box in box_xyxy:
-                assert isinstance(box, jt.Var)
-                x1, y1, x2, y2 = [int(i) for i in jt.tolist(box)]
+                x1, y1, x2, y2 = [int(i) for i in box.tolist()]
+                # Jittor var 也可以支持切片赋值，但最好 img 是 jt.Var
                 img[:, y1:y2, x1:x2] = 0
-                # _cnt += 1
-        # print("_cnt:", _cnt)
         return target, img
 
 
@@ -332,13 +328,19 @@ dataset_hook_register = {
     'BboxPertuber': BboxPertuber,
 }
 
-
+# Jittor 没有直接的 torchvision.datasets.CocoDetection，需要重新实现
 class CocoDetection(Dataset):
     def __init__(self, img_folder, ann_file, transforms, return_masks, aux_target_hacks=None):
-        super(CocoDetection, self).__init__(img_folder, ann_file)
+        super(CocoDetection, self).__init__()
+        self.root = img_folder
+        self.coco = COCO(ann_file)
+        self.ids = list(sorted(self.coco.imgs.keys()))
         self._transforms = transforms
         self.prepare = ConvertCocoPolysToMask(return_masks)
         self.aux_target_hacks = aux_target_hacks
+        
+        # Jittor dataset 需要设置 total_len
+        self.set_attrs(total_len=len(self.ids))
 
     def change_hack_attr(self, hackclassname, attrkv_dict):
         target_class = dataset_hook_register[hackclassname]
@@ -357,6 +359,9 @@ class CocoDetection(Dataset):
         path = self.coco.loadImgs(id)[0]["file_name"]
         abs_path = os.path.join(self.root, path)
         return Image.open(abs_path).convert("RGB")
+    
+    def _load_target(self, id: int) -> List[Any]:
+        return self.coco.loadAnns(self.coco.getAnnIds(id))
 
     def __getitem__(self, idx):
         """
@@ -366,14 +371,11 @@ class CocoDetection(Dataset):
                     Init type: x0,y0,x1,y1. unnormalized data.
                     Final type: cx,cy,w,h. normalized data. 
         """
-        try:
-            img, target = super(CocoDetection, self).__getitem__(idx)
-        except:
-            print("Error idx: {}".format(idx))
-            idx += 1
-            img, target = super(CocoDetection, self).__getitem__(idx)
         image_id = self.ids[idx]
-        target = {'image_id': image_id, 'annotations': target}
+        img = self._load_image(image_id)
+        target_anns = self._load_target(image_id)
+        
+        target = {'image_id': image_id, 'annotations': target_anns}
         img, target = self.prepare(img, target)
         
         if self._transforms is not None:
@@ -394,7 +396,8 @@ def convert_coco_poly_to_mask(segmentations, height, width):
         mask = coco_mask.decode(rles)
         if len(mask.shape) < 3:
             mask = mask[..., None]
-        mask = jt.array(mask, dtype=jt.uint8)
+        # Jittor supports array conversion. mask is numpy usually
+        mask = jt.array(mask).uint8() 
         mask = mask.any(dim=2)
         masks.append(mask)
     if masks:
@@ -412,7 +415,8 @@ class ConvertCocoPolysToMask(object):
         w, h = image.size
 
         image_id = target["image_id"]
-        image_id = jt.array([image_id])
+        # torch.tensor -> jt.Var
+        image_id = jt.Var([image_id])
 
         anno = target["annotations"]
 
@@ -420,14 +424,17 @@ class ConvertCocoPolysToMask(object):
 
         boxes = [obj["bbox"] for obj in anno]
         # guard against no boxes via resizing
-        boxes = jt.array(boxes, dtype=jt.float32).reshape(-1, 4)
-        assert isinstance(boxes, jt.Var)
-        boxes[:, 2:] += boxes[:, :2]
-        boxes[:, 0::2] = jt.clamp(boxes[:, 0::2], min_v=0, max_v=w)
-        boxes[:, 1::2] = jt.clamp(boxes[:, 1::2], min_v=0, max_v=h)
+        boxes = jt.array(boxes).float32().reshape(-1, 4)
+        
+        # Jittor inplace 操作可能不被追踪，建议显式赋值
+        # boxes[:, 2:] += boxes[:, :2]
+        boxes[:, 2:4] = boxes[:, 2:4] + boxes[:, 0:2]
+        
+        boxes[:, 0::2] = boxes[:, 0::2].clamp(min_v=0, max_v=w)
+        boxes[:, 1::2] = boxes[:, 1::2].clamp(min_v=0, max_v=h)
 
         classes = [obj["category_id"] for obj in anno]
-        classes = jt.array(classes, dtype=jt.int64)
+        classes = jt.array(classes).int64()
 
         if self.return_masks:
             segmentations = [obj["segmentation"] for obj in anno]
@@ -436,10 +443,9 @@ class ConvertCocoPolysToMask(object):
         keypoints = None
         if anno and "keypoints" in anno[0]:
             keypoints = [obj["keypoints"] for obj in anno]
-            keypoints = jt.array(keypoints, dtype=jt.float32)
+            keypoints = jt.array(keypoints).float32()
             num_keypoints = keypoints.shape[0]
             if num_keypoints:
-                assert isinstance(keypoints, jt.Var)
                 keypoints = keypoints.view(num_keypoints, -1, 3)
 
         keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
@@ -460,13 +466,13 @@ class ConvertCocoPolysToMask(object):
             target["keypoints"] = keypoints
 
         # for conversion to coco api
-        area = jt.Var([obj["area"] for obj in anno])
-        iscrowd = jt.Var([obj["iscrowd"] if "iscrowd" in obj else 0 for obj in anno])
+        area = jt.array([obj["area"] for obj in anno])
+        iscrowd = jt.array([obj["iscrowd"] if "iscrowd" in obj else 0 for obj in anno])
         target["area"] = area[keep]
         target["iscrowd"] = iscrowd[keep]
 
-        target["orig_size"] = jt.Var([int(h), int(w)])
-        target["size"] = jt.Var([int(h), int(w)])
+        target["orig_size"] = jt.array([int(h), int(w)])
+        target["size"] = jt.array([int(h), int(w)])
 
         return image, target
 
@@ -499,14 +505,13 @@ def make_coco_transforms(image_set, fix_size=False, strong_aug=False, args=None)
         scales2_resize = [int(i*data_aug_scale_overlap) for i in scales2_resize]
         scales2_crop = [int(i*data_aug_scale_overlap) for i in scales2_crop]
 
-    datadict_for_print = {
-        'scales': scales,
-        'max_size': max_size,
-        'scales2_resize': scales2_resize,
-        'scales2_crop': scales2_crop
-    }
-    # print("data_aug_params:", json.dumps(datadict_for_print, indent=2))
-
+    # datadict_for_print = {
+    #     'scales': scales,
+    #     'max_size': max_size,
+    #     'scales2_resize': scales2_resize,
+    #     'scales2_crop': scales2_crop
+    # }
+    
     if image_set == 'train':
         if fix_size:
             return T.Compose([
@@ -552,7 +557,6 @@ def make_coco_transforms(image_set, fix_size=False, strong_aug=False, args=None)
         ])
 
     if image_set in ['val', 'eval_debug', 'train_reg', 'test']:
-
         if os.environ.get("GFLOPS_DEBUG_SHILONG", False) == 'INFO':
             print("Under debug mode for flops calculation only!!!!!!!!!!!!!!!!")
             return T.Compose([
@@ -564,8 +568,6 @@ def make_coco_transforms(image_set, fix_size=False, strong_aug=False, args=None)
             T.RandomResize([max(scales)], max_size=max_size),
             normalize,
         ])
-
-
 
     raise ValueError(f'unknown {image_set}')
 
@@ -650,6 +652,7 @@ def build(image_set, args, datasetinfo):
 
 
 if __name__ == "__main__":
+    # for debug only
     # Objects365 Val example
     dataset_o365 = CocoDetection(
             '/path/Objects365/train/',

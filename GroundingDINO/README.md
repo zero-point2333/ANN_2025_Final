@@ -206,7 +206,7 @@ CUDA_VISIBLE_DEVICES={GPU ID} python demo/inference_on_a_image.py \
 
 If you would like to specify the phrases to detect, here is a demo:
 ```bash
-CUDA_VISIBLE_DEVICES={GPU ID} python demo/inference_on_a_image.py \
+CUDA_VISIBLE_DEVICES={0} python demo/inference_on_a_image.py \
 -c groundingdino/config/GroundingDINO_SwinT_OGC.py \
 -p weights/groundingdino_swint_ogc.pth \
 -i .asset/cat_dog.jpeg \

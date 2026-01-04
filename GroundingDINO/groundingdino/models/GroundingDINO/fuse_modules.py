@@ -205,41 +205,9 @@ class BiMultiHeadAttention(nn.Module):
         attn_output_l = attn_output_l.view(bsz, self.num_heads, src_len, self.head_dim)
         attn_output_l = attn_output_l.transpose(1, 2)
         attn_output_l = attn_output_l.reshape(bsz, src_len, self.embed_dim)
-
-        # -------------------------------------------------------------------------
-        # 修改开始: 使用分块处理 (Chunking) 来避免 Segfault 和降低显存
-        # -------------------------------------------------------------------------
         
-        # 1. 处理 Vision Output
-        # 如果序列长度小于Chunk大小，直接执行（保持小数据的效率）
-        if tgt_len <= self.chunk_size_inference:
-            attn_output_v = self.out_v_proj(attn_output_v)
-        else:
-            # 否则进行切片循环
-            v_chunks = []
-            for i in range(0, tgt_len, self.chunk_size_inference):
-                # 切片: [bs, chunk, dim]
-                chunk = attn_output_v[:, i : i + self.chunk_size_inference, :]
-                # 线性层计算
-                chunk_out = self.out_v_proj(chunk)
-                v_chunks.append(chunk_out)
-            # 拼接回完整 Tensor
-            attn_output_v = jt.concat(v_chunks, dim=1)
-
-        # 2. 处理 Language Output
-        if src_len <= self.chunk_size_inference:
-            attn_output_l = self.out_l_proj(attn_output_l)
-        else:
-            l_chunks = []
-            for i in range(0, src_len, self.chunk_size_inference):
-                chunk = attn_output_l[:, i : i + self.chunk_size_inference, :]
-                chunk_out = self.out_l_proj(chunk)
-                l_chunks.append(chunk_out)
-            attn_output_l = jt.concat(l_chunks, dim=1)
-
-        # -------------------------------------------------------------------------
-        # 修改结束
-        # -------------------------------------------------------------------------
+        attn_output_v = self.out_v_proj(attn_output_v)
+        attn_output_l = self.out_l_proj(attn_output_l)
 
         return attn_output_v, attn_output_l
 
