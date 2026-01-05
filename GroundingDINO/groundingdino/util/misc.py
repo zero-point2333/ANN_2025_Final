@@ -465,12 +465,14 @@ def save_on_master(*args, **kwargs):
     Save checkpoint on main process.
 
     Jittor port note:
-        For simplicity we disable checkpoint saving here. Keeping the
-        function for API compatibility.
+        Only rank0 writes checkpoints to avoid multi-process conflicts.
     """
-    if is_main_process():
-        # You can optionally plug in `jt.save` or `pickle.dump` here if needed.
-        pass
+    if not is_main_process():
+        return
+    if len(args) >= 2:
+        args = list(args)
+        args[1] = os.fspath(args[1])
+    jt.save(*args, **kwargs)
 
 
 def init_distributed_mode(args):
