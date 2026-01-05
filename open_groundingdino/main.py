@@ -318,7 +318,7 @@ def main(args):
                     'args': args,
                 }
 
-                utils.save_on_master(weights, checkpoint_path)
+                utils.save_on_master(weights, str(checkpoint_path))
                 
         # eval
         print("Eval Start")
