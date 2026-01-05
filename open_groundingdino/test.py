@@ -13,7 +13,7 @@ import jittor as jt
 import numpy as np
 
 from models.GroundingDINO.ops.ms_deform_attn_func import MSDeformAttnFunction
-from models.GroundingDINO.ops.ms_deform_attn import ms_deform_attn_core_jittor
+from models.GroundingDINO.ms_deform_attn import ms_deform_attn_core_jittor
 
 
 N, M, D = 1, 2, 2

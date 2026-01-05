@@ -1,16 +1,43 @@
 import argparse
 import os
+import sys
+
 import numpy as np
-import torch
 from PIL import Image, ImageDraw, ImageFont
 
-# please make sure https://github.com/IDEA-Research/GroundingDINO is installed correctly.
+# # =======================
+# # CPU-only hard switches
+# # (MUST be set before importing groundingdino.util.inference which imports jittor)
+# # =======================
+CPU_ONLY_FLAG = "--cpu-only" in sys.argv # judgment, only for observation, not a setting
+# os.environ["TRANSFORMERS_OFFLINE"] = "1"
+# os.environ["HF_DATASETS_OFFLINE"] = "1"
+# os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# # 1) Tell Jittor "do NOT use cuda" via flag-style env var
+# if CPU_ONLY_FLAG:
+#     os.environ["use_cuda"] = "0"
+#     # 2) Prevent CUDA toolchain auto-enable / auto-download
+#     os.environ["nvcc_path"] = ""
+#     # 3) Hide GPUs from CUDA runtime (use empty string; avoid -1 which can be quirky)
+#     os.environ["CUDA_VISIBLE_DEVICES"] = ""
+# # 4) Avoid multiprocess compiler pool (sandbox blocks semaphores)
+# os.environ["DISABLE_MULTIPROCESSING"] = "1"
+# # 5) Point Jittor at the right pythonX.Y-config so it won't try to compile against system python
+# exe_real = os.path.realpath(sys.executable)
+# py_config = os.path.join(os.path.dirname(exe_real), f"python{sys.version_info.major}.{sys.version_info.minor}-config")
+# os.environ.setdefault("python_config_path", py_config)
+# Enable verbose NaN/Inf diagnostics
+os.environ.setdefault("GROUNDINGDINO_DEBUG_NAN", "1")
+
+import jittor as jt
 import datasets.transforms as T
 from models import build_model
 from util import box_ops
 from util.slconfig import SLConfig
 from util.utils import clean_state_dict, get_phrases_from_posmap
 from util.vl_utils import create_positive_map_from_span
+from util.debug_tools import log_text, log_tensor
 
 
 def plot_boxes_to_image(image_pil, tgt):
@@ -24,9 +51,10 @@ def plot_boxes_to_image(image_pil, tgt):
     mask_draw = ImageDraw.Draw(mask)
 
     # draw boxes and masks
+    log_text(f"box size: {boxes.shape}")
     for box, label in zip(boxes, labels):
         # from 0..1 to 0..W, 0..H
-        box = box * torch.Tensor([W, H, W, H])
+        box = box * jt.array([W, H, W, H])
         # from xywh to xyxy
         box[:2] -= box[2:] / 2
         box[2:] += box[:2]
@@ -48,7 +76,8 @@ def plot_boxes_to_image(image_pil, tgt):
         # bbox = draw.textbbox((x0, y0), str(label))
         draw.rectangle(bbox, fill=color)
         draw.text((x0, y0), str(label), fill="white")
-
+        
+        log_text(f"Drawing on [{x0}, {y0}, {x1}, {y1}]")
         mask_draw.rectangle([x0, y0, x1, y1], fill=255, width=6)
 
     return image_pil, mask
@@ -87,16 +116,91 @@ def load_image(image_path):
         ]
     )
     image, _ = transform(image_pil, None)  # 3, h, w
+    assert isinstance(image, np.ndarray)
+    log_text(f"load_image: raw type={type(image)}")
+    log_tensor("image", image)
+    if not isinstance(image, jt.Var):
+        if hasattr(image, 'numpy'):
+            image = jt.array(image.numpy())
+        else:
+            image = jt.array(image)
+    # Add batch dimension
+    assert isinstance(image, jt.Var)
+    log_text(f"load_image: jt type={type(image)}")
+    image = jt.unsqueeze(image, 0)  # 1, 3, h, w
     return image_pil, image
 
 
 def load_model(model_config_path, model_checkpoint_path, cpu_only=False):
+    assert isinstance(model_config_path, str)
+    assert isinstance(model_checkpoint_path, str)
     args = SLConfig.fromfile(model_config_path)
+    assert isinstance(args, SLConfig)
     args.device = "cuda" if not cpu_only else "cpu"
-    model = build_model(args)
-    checkpoint = torch.load(model_checkpoint_path, map_location="cpu")
-    load_res = model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
-    print(load_res)
+    model, _, _ = build_model(args)
+    log_text(f"load_model: cpu_only={cpu_only} jt.flags.use_cuda={jt.flags.use_cuda}")
+    print("model built")
+    checkpoint = jt.load(model_checkpoint_path)
+    if isinstance(checkpoint, dict):
+        state_dict = checkpoint.get("model", checkpoint.get("state_dict", checkpoint))
+    else:
+        state_dict = checkpoint
+    # Clean and filter state dict
+    cleaned_sd = clean_state_dict(state_dict)
+    bert_sd = {k[len("bert."):]: v for k, v in cleaned_sd.items() if k.startswith("bert.")}
+    if bert_sd:
+        bert = getattr(model, "bert", None)
+        if bert is not None and hasattr(bert, "load_bert_state_dict"):
+            try:
+                bert.load_bert_state_dict(bert_sd, strict=False)
+            except Exception as exc:
+                log_text(f"bert load failed: {exc}")
+        else:
+            log_text("bert load skipped: model.bert missing or no load_bert_state_dict")
+    else:
+        log_text("bert load skipped: no bert.* keys in checkpoint")
+
+    non_bert_sd = {k: v for k, v in cleaned_sd.items() if not k.startswith("bert.")}
+    model_sd = model.state_dict()
+    filtered_sd = {}
+    shape_mismatch = []
+    for k, v in non_bert_sd.items():
+        if k not in model_sd:
+            continue
+        v_shape = getattr(v, "shape", None)
+        tgt_shape = getattr(model_sd[k], "shape", None)
+        if v_shape is not None and tgt_shape is not None and tuple(v_shape) != tuple(tgt_shape):
+            shape_mismatch.append(k)
+            continue
+        filtered_sd[k] = v
+    unfiltered_sd = {k: v for k, v in non_bert_sd.items() if k not in model_sd}
+    missing_in_ckpt = [k for k in model_sd.keys() if k not in non_bert_sd]
+    log_text(
+        f"state_dict: matched={len(filtered_sd)} total_non_bert={len(non_bert_sd)} "
+        f"bert={len(bert_sd)} unexpected={len(unfiltered_sd)} "
+        f"missing={len(missing_in_ckpt)} shape_mismatch={len(shape_mismatch)}"
+    )
+    if unfiltered_sd:
+        log_text(f"unexpected sample: {list(unfiltered_sd.keys())[:5]}")
+    if missing_in_ckpt:
+        log_text(f"missing sample: {missing_in_ckpt[:5]}")
+    if shape_mismatch:
+        log_text(f"shape mismatch sample: {shape_mismatch[:5]}")
+    try:
+        try:
+            load_res = model.load_state_dict(filtered_sd, strict=False)
+        except TypeError:
+            load_res = model.load_state_dict(filtered_sd)
+        if isinstance(load_res, tuple) and len(load_res) == 2:
+            missing, unexpected = load_res
+        else:
+            missing, unexpected = [], []
+        log_text(
+            f"Loaded {len(filtered_sd)}/{len(non_bert_sd)} non-bert params "
+            f"(missing={len(missing)}, unexpected={len(unexpected)})"
+        )
+    except Exception as exc:
+        log_text(f"load_state_dict failed: {exc}")
     _ = model.eval()
     return model
 
@@ -108,10 +212,15 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
     if not caption.endswith("."):
         caption = caption + "."
     device = "cuda" if not cpu_only else "cpu"
-    model = model.to(device)
-    image = image.to(device)
-    with torch.no_grad():
-        outputs = model(image[None], captions=[caption])
+    # model = model.to(device)  # Jittor does not have to() method
+    # image = image.to(device)  # Jittor Var does not have to() method
+    log_text(f"get_grounding_output: image type={type(image)} caption type={type(caption)}")
+    assert isinstance(image, jt.Var)
+    with jt.no_grad():
+        outputs = model(image, captions=[caption])
+    log_text(f"get_grounding_output: outputs keys={list(outputs.keys())}")
+    assert isinstance(outputs["pred_logits"], jt.Var)
+    assert isinstance(outputs["pred_boxes"], jt.Var)
     logits = outputs["pred_logits"].sigmoid()[0]  # (nq, 256)
     boxes = outputs["pred_boxes"][0]  # (nq, 4)
 
@@ -119,7 +228,10 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
     if token_spans is None:
         logits_filt = logits.cpu().clone()
         boxes_filt = boxes.cpu().clone()
-        filt_mask = logits_filt.max(dim=1)[0] > box_threshold
+        assert isinstance(logits_filt, jt.Var)
+        logits_filt_max = jt.array(logits_filt.max(dim=1))
+        filt_mask = logits_filt_max > box_threshold
+        log_text(f"Overall filt_mask sum: {filt_mask.sum().item()}, box_threshold: {box_threshold}")
         logits_filt = logits_filt[filt_mask]  # num_filt, 256
         boxes_filt = boxes_filt[filt_mask]  # num_filt, 4
 
@@ -137,19 +249,24 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
     else:
         # given-phrase mode
         positive_maps = create_positive_map_from_span(
-            model.tokenizer(text_prompt),
+            model.tokenizer(caption),
             token_span=token_spans
-        ).to(image.device) # n_phrase, 256
+        ) # n_phrase, 256
 
-        logits_for_phrases = positive_maps @ logits.T # n_phrase, nq
+        log_tensor("logits", logits)
+        log_tensor("positive_maps", positive_maps)
+        logits_for_phrases: jt.Var = positive_maps.astype(jt.float64) @ jt.transpose(logits) # n_phrase, nq
+        log_tensor("logits_for_phrases", logits_for_phrases)
         all_logits = []
         all_phrases = []
         all_boxes = []
         for (token_span, logit_phr) in zip(token_spans, logits_for_phrases):
+            assert isinstance(logit_phr, jt.Var)
             # get phrase
             phrase = ' '.join([caption[_s:_e] for (_s, _e) in token_span])
             # get mask
             filt_mask = logit_phr > box_threshold
+            log_text(f"Phrase: '{phrase}', filt_mask sum: {filt_mask.sum().item()}, logit_phr max: {logit_phr.max().item():.4f}, mean: {logit_phr.mean().item():.4f}, min: {logit_phr.min().item():.4f}")
             # filt box
             all_boxes.append(boxes[filt_mask])
             # filt logits
@@ -159,7 +276,7 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
                 all_phrases.extend([phrase + f"({str(logit.item())[:4]})" for logit in logit_phr_num])
             else:
                 all_phrases.extend([phrase for _ in range(len(filt_mask))])
-        boxes_filt = torch.cat(all_boxes, dim=0).cpu()
+        boxes_filt = jt.concat(all_boxes, dim=0).cpu()
         pred_phrases = all_phrases
 
 
@@ -191,7 +308,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--cpu-only", action="store_true", help="running on cpu only!, default=False")
     args = parser.parse_args()
-
+    log_text(f"args.cpu_only={args.cpu_only} CPU_ONLY_FLAG={CPU_ONLY_FLAG} jt.flags.use_cuda={jt.flags.use_cuda}")
     # cfg
     config_file = args.config_file  # change the path of the model config file
     checkpoint_path = args.checkpoint_path  # change the path of the model
@@ -229,7 +346,7 @@ if __name__ == "__main__":
     # set the text_threshold to None if token_spans is set.
     if token_spans is not None:
         text_threshold = None
-        print("Using token_spans. Set the text_threshold to None.")
+        log_text("Using token_spans. Set the text_threshold to None.")
 
 
     for image_path in image_list:

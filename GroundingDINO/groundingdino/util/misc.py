@@ -435,6 +435,7 @@ def nested_tensor_from_tensor_list(tensor_list: List):
     return NestedTensor(tensor, mask)
 
 
+
 def setup_for_distributed(is_master):
     """
     This function disables printing when not in master process.

@@ -508,19 +508,18 @@ class TransformerEncoder(nn.Module):
 
     @staticmethod
     def get_reference_points(spatial_shapes: jt.Var, valid_ratios: jt.Var, device=None) -> jt.Var:
-        spatial_shapes_np = spatial_shapes.numpy()
         reference_points_list = []
-        for lvl, (H_, W_) in enumerate(spatial_shapes_np):
-            H_int, W_int = int(H_), int(W_) # change int32 to int
-
+        for lvl, (H_, W_) in enumerate(spatial_shapes):
+            H_int = H_.int().item()
+            W_int = W_.int().item()
             ref_y, ref_x = jt.meshgrid(
                 jt.linspace(0.5, H_int - 0.5, H_int).float32(),
                 jt.linspace(0.5, W_int - 0.5, W_int).float32(),
             )
             assert isinstance(ref_y, jt.Var)
             assert isinstance(ref_x, jt.Var)
-            ref_y: jt.Var = ref_y.reshape(-1)[None] / (valid_ratios[:, None, lvl, 1] * H_int)
-            ref_x: jt.Var = ref_x.reshape(-1)[None] / (valid_ratios[:, None, lvl, 0] * W_int)
+            ref_y: jt.Var = ref_y.reshape(-1)[None] / (valid_ratios[:, None, lvl, 1] * H_)
+            ref_x: jt.Var = ref_x.reshape(-1)[None] / (valid_ratios[:, None, lvl, 0] * W_)
             ref: jt.Var = jt.stack((ref_x, ref_y), -1)
             reference_points_list.append(ref)
         reference_points = jt.concat(reference_points_list, 1)

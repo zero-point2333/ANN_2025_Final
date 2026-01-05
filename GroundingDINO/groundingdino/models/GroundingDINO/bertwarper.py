@@ -31,13 +31,22 @@ class BertModelWarper(nn.Module):
     def load_bert_state_dict(self, state_dict, strict=False):
         if state_dict is None:
             return None
-        load_res = self._bert_model.load_state_dict(state_dict, strict=strict)
+        torch = sys.modules.get("torch")
+        if torch is None:
+            import torch  # transformers is torch-based; keep conversion here
+        converted = {}
+        for k, v in state_dict.items():
+            if torch.is_tensor(v):
+                converted[k] = v
+            else:
+                converted[k] = torch.as_tensor(v)
+        load_res = self._bert_model.load_state_dict(converted, strict=strict)
         try:
             missing = getattr(load_res, "missing_keys", None)
             unexpected = getattr(load_res, "unexpected_keys", None)
             if missing is not None or unexpected is not None:
                 log_text(
-                    f"bert.load_state_dict: keys={len(state_dict)} "
+                    f"bert.load_state_dict: keys={len(converted)} "
                     f"missing={len(missing) if missing is not None else 'n/a'} "
                     f"unexpected={len(unexpected) if unexpected is not None else 'n/a'}"
                 )
@@ -250,7 +259,7 @@ def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_token
     # special_tokens_mask: bs, num_token. 1 for special tokens. 0 for normal tokens
     special_tokens_mask = jt.zeros((bs, num_token)).bool()
     for special_token in special_tokens_list:
-        special_tokens_mask |= input_ids == special_token
+        special_tokens_mask = special_tokens_mask | (input_ids == special_token) 
 
     # idxs: each row is a list of indices of special tokens
     idxs = jt.nonzero(special_tokens_mask)
@@ -278,11 +287,10 @@ def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_token
         previous_col = col
 
     cate_to_token_mask_list = [
-        jt.stack(cate_to_token_mask_listi, dim=0)
-        if len(cate_to_token_mask_listi) > 0
-        else jt.zeros((0, num_token)).bool()
-        for cate_to_token_mask_listi in cate_to_token_mask_list
+    jt.stack(cate_to_token_mask_listi, dim=0)
+    for cate_to_token_mask_listi in cate_to_token_mask_list
     ]
+
 
     # # padding mask
     # padding_mask = tokenized['attention_mask']

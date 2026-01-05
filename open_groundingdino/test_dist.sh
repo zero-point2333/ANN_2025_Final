@@ -1,7 +1,7 @@
 CFG="${1:-config/cfg_odvg.py}"
 DATASETS="${2:-config/datasets_mixed_odvg.json}"
 OUTPUT_DIR="${3:-outputs}"
-PRETRAIN_MODEL_PATH="${4:-weights/groundingdino_swint_ogc.pth}"
+PRETRAIN_MODEL_PATH="${4:-outputs/eval/latest.pth}"
 TEXT_ENCODER_PATH="${TEXT_ENCODER_PATH:-bert-base-uncased}"
 EXTRA_OPTIONS="${EXTRA_OPTIONS:-}"
 

@@ -13,7 +13,6 @@
 
 from groundingdino.util.debug_tools import log_text
 import numpy as np
-import math
 import jittor as jt
 import jittor.nn as nn
 import jittor.nn as F
@@ -118,7 +117,7 @@ class WindowAttention(nn.Module):
         relative_coords[:, :, 1] += self.window_size[1] - 1
         relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
         relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
-        self.register_buffer("relative_position_index", relative_position_index)
+        self.relative_position_index = relative_position_index.stop_grad()
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
@@ -222,7 +221,7 @@ class SwinTransformerBlock(nn.Module):
             proj_drop=drop,
         )
 
-        self.drop_path = nn.Dropout(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.drop_path = nn.DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(

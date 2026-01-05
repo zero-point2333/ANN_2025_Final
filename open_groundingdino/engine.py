@@ -72,7 +72,7 @@ def train_one_epoch(model, criterion,
     if not wo_class_error:
         metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = 'Epoch: [{}]'.format(epoch)
-    print_freq = 10
+    print_freq = 1
 
     _cnt = 0
     accum_steps = getattr(args, "accumulation_steps", 1)
@@ -149,6 +149,8 @@ def train_one_epoch(model, criterion,
             jt.gc()
 
         _cnt += 1
+        # if _cnt==3:
+        #     break
         if args.debug and _cnt % 15 == 0:
             print("BREAK!"*5)
             break
