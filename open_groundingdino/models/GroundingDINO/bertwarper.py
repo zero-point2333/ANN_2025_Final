@@ -287,11 +287,10 @@ def generate_masks_with_special_tokens_and_transfer_map(tokenized, special_token
         previous_col = col
 
     cate_to_token_mask_list = [
-        jt.stack(cate_to_token_mask_listi, dim=0)
-        if len(cate_to_token_mask_listi) > 0
-        else jt.zeros((0, num_token)).bool()
-        for cate_to_token_mask_listi in cate_to_token_mask_list
+    jt.stack(cate_to_token_mask_listi, dim=0)
+    for cate_to_token_mask_listi in cate_to_token_mask_list
     ]
+
 
     # # padding mask
     # padding_mask = tokenized['attention_mask']

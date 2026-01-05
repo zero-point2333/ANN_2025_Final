@@ -343,32 +343,32 @@ class GroundingDINO(nn.Module):
             out['interm_outputs'] = {'pred_logits': interm_class, 'pred_boxes': interm_coord}
             out['interm_outputs_for_matching_pre'] = {'pred_logits': interm_class, 'pred_boxes': init_box_proposal}
 
-        safe_min = -100.0
-        safe_max = 100.0
+        # safe_min = -100.0
+        # safe_max = 100.0
         
-        # 1. 修复主输出
-        if isinstance(out["pred_logits"], jt.Var):
-            out["pred_logits"] = jt.clamp(out["pred_logits"], safe_min, safe_max)
-            # 如果出现 nan，将其置为 0 (背景类)
-            if jt.any(jt.isnan(out["pred_logits"])).item():
-                out["pred_logits"] = jt.where(
-                    jt.isnan(out["pred_logits"]), 
-                    jt.zeros_like(out["pred_logits"]), 
-                    out["pred_logits"]
-                )
+        # # 1. 修复主输出
+        # if isinstance(out["pred_logits"], jt.Var):
+        #     out["pred_logits"] = jt.clamp(out["pred_logits"], safe_min, safe_max)
+        #     # 如果出现 nan，将其置为 0 (背景类)
+        #     if jt.any(jt.isnan(out["pred_logits"])).item():
+        #         out["pred_logits"] = jt.where(
+        #             jt.isnan(out["pred_logits"]), 
+        #             jt.zeros_like(out["pred_logits"]), 
+        #             out["pred_logits"]
+        #         )
 
-        # 2. 修复辅助输出 (Aux Loss)
-        if "aux_outputs" in out:
-            for aux in out["aux_outputs"]:
-                if "pred_logits" in aux:
-                    aux["pred_logits"] = jt.clamp(aux["pred_logits"], safe_min, safe_max)
+        # # 2. 修复辅助输出 (Aux Loss)
+        # if "aux_outputs" in out:
+        #     for aux in out["aux_outputs"]:
+        #         if "pred_logits" in aux:
+        #             aux["pred_logits"] = jt.clamp(aux["pred_logits"], safe_min, safe_max)
 
-        # 3. 修复中间输出 (Two-stage)
-        if "interm_outputs" in out and "pred_logits" in out["interm_outputs"]:
-            out["interm_outputs"]["pred_logits"] = jt.clamp(out["interm_outputs"]["pred_logits"], safe_min, safe_max)
+        # # 3. 修复中间输出 (Two-stage)
+        # if "interm_outputs" in out and "pred_logits" in out["interm_outputs"]:
+        #     out["interm_outputs"]["pred_logits"] = jt.clamp(out["interm_outputs"]["pred_logits"], safe_min, safe_max)
         
-        if "interm_outputs_for_matching_pre" in out and "pred_logits" in out["interm_outputs_for_matching_pre"]:
-            out["interm_outputs_for_matching_pre"]["pred_logits"] = jt.clamp(out["interm_outputs_for_matching_pre"]["pred_logits"], safe_min, safe_max)
+        # if "interm_outputs_for_matching_pre" in out and "pred_logits" in out["interm_outputs_for_matching_pre"]:
+        #     out["interm_outputs_for_matching_pre"]["pred_logits"] = jt.clamp(out["interm_outputs_for_matching_pre"]["pred_logits"], safe_min, safe_max)
         # ========================================================
 
         return out
@@ -432,9 +432,10 @@ class SetCriterion(nn.Module):
         log_tensor("loss_boxes.src_boxes", src_boxes)
         log_tensor("loss_boxes.target_boxes", target_boxes)
         # Use elementwise L1 to keep [num_boxes, 4] for downstream slicing.
-        loss_bbox = (src_boxes - target_boxes).abs()
-        if loss_bbox.ndim == 1:
-            loss_bbox = loss_bbox.reshape(1, -1)
+        # 关键对齐
+        loss_bbox = jt.abs(src_boxes - target_boxes)
+        # if loss_bbox.ndim == 1:
+        #     loss_bbox = loss_bbox.reshape(1, -1)
         if debug_enabled():
             jt.sync_all()
             log_text("loss_boxes after loss_bbox", force=True)
@@ -453,7 +454,7 @@ class SetCriterion(nn.Module):
             if debug_enabled():
                 jt.sync_all()
                 log_text("loss_boxes before giou", force=True)
-            loss_giou = 1 - box_ops.generalized_box_iou_pairwise(src_xyxy, tgt_xyxy)
+            loss_giou = 1 - jt.diag(box_ops.generalized_box_iou(src_xyxy, tgt_xyxy))
             if debug_enabled():
                 jt.sync_all()
                 log_text("loss_boxes after giou", force=True)
@@ -470,6 +471,7 @@ class SetCriterion(nn.Module):
 
     def token_sigmoid_binary_focal_loss(self, outputs, targets, indices, num_boxes):
         pred_logits=outputs['pred_logits']
+        # pred_logits = jt.clamp(pred_logits, -100.0, 100.0) 
         new_targets=outputs['one_hot']
         text_mask=outputs['text_mask']
 
@@ -480,15 +482,30 @@ class SetCriterion(nn.Module):
         alpha=self.focal_alpha
         gamma=self.focal_gamma
         mask_f = None
+        ## 关键修改
         if text_mask is not None:
-            # ODVG: each sample has different mask
-            assert isinstance(text_mask, jt.Var) 
-            text_mask = text_mask.repeat(1, pred_logits.size(1)).view(outputs['text_mask'].shape[0],-1,outputs['text_mask'].shape[1]) # not highlighted, but doc says it has
-            mask_f = text_mask.astype(pred_logits.dtype)
+            # 保证 mask 是 bool
+            text_mask = text_mask.repeat(1, pred_logits.size(1)).view(
+                outputs['text_mask'].shape[0], -1, outputs['text_mask'].shape[1]
+            ).bool()
+
+            # === 关键：真正“删掉”被 mask 的元素 ===
+            pred_logits = pred_logits[text_mask]
+            new_targets = new_targets[text_mask]
+
 
         new_targets = new_targets.float()
         p = jt.sigmoid(pred_logits)
-        ce_loss = nn.binary_cross_entropy_with_logits(pred_logits, new_targets)
+        # 重载对应函数
+        def bce_with_logits_loss(logits, targets):
+    # logits, targets: jt.Var, same shape
+            return (
+                jt.maximum(logits, 0)
+                - logits * targets
+                + jt.log(1 + jt.exp(-jt.abs(logits)))
+            )
+
+        ce_loss = bce_with_logits_loss(pred_logits, new_targets)
         p_t = p * new_targets + (1 - p) * (1 - new_targets)
         loss = ce_loss * ((1 - p_t) ** gamma)
 
