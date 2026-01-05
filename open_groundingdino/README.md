@@ -149,8 +149,8 @@ config/datasets_mixed_odvg.json      # support mixed dataset for both OD and VG
 Run the following commands to train and test:
 
 ```bash
-train_dist.sh
-test_dist.sh
+bash train_dist.sh
+bash test_dist.sh
 ```
 
 *To Be Added*: Distributed Training Script.
