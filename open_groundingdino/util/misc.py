@@ -92,15 +92,6 @@ class SmoothedValue(object):
         )
 
 
-@functools.lru_cache()
-def _get_global_gloo_group():
-    """
-    Placeholder kept for API compatibility. In this Jittor port,
-    distributed training is disabled, so this simply returns None.
-    """
-    return None
-
-
 def all_gather_cpu(data):
     """
     Run all_gather on arbitrary picklable data (not necessarily tensors).
@@ -257,7 +248,7 @@ def collate_fn(batch):
 
 
 def _max_by_axis(the_list: List[List[int]]) -> List[int]:
-    maxes = list(the_list[0])
+    maxes = the_list[0]
     for sublist in the_list[1:]:
         for index, item in enumerate(sublist):
             maxes[index] = max(maxes[index], item)
@@ -281,14 +272,12 @@ class NestedTensor(object):
         
         # 2. Mask 处理
         if isinstance(mask, str) and mask == "auto":
+            self.mask = jt.zeros_like(tensors)
             # 自动构建 "全0 (无padding)" mask
             if self.tensors.ndim == 3:
-                _, h, w = self.tensors.shape
-                # mask 不需要梯度，必须 stop_grad
-                self.mask = jt.zeros((h, w)).bool().stop_grad()
+                self.mask = self.mask.sum(0)
             elif self.tensors.ndim == 4:
-                b, _, h, w = self.tensors.shape
-                self.mask = jt.zeros((b, h, w)).bool().stop_grad()
+                self.mask = self.mask.sum(1).to(bool)
             else:
                 raise ValueError(f"tensors dim must be 3 or 4 but got {self.tensors.ndim}")
         else:
@@ -296,15 +285,14 @@ class NestedTensor(object):
             if mask is not None:
                 if not isinstance(mask, jt.Var):
                     mask = jt.array(mask)
-                # 关键：确保 mask 不带梯度
-                self.mask = mask.stop_grad()
+                self.mask = mask
             else:
                 self.mask = None
 
     def imgsize(self):
         """
         Return a list of [H, W] for each image.
-        Uses jittor ops to avoid sync, but returns python list for compatibility.
+        Uses jittor ops to avoid sync.
         """
         res = []
         if self.tensors.ndim != 4:
@@ -320,12 +308,12 @@ class NestedTensor(object):
         
         for i in range(self.tensors.shape[0]):
             mask_i = self.mask[i] 
-            inv = ~mask_i # False = padding
+            inv = jt.logical_not(mask_i) # False = padding
             
             # 使用 Jittor 算子计算高宽
-            maxH = inv.sum(dim=0).max().item() # .item() 会触发同步，但在后处理中通常是必要的
-            maxW = inv.sum(dim=1).max().item()
-            res.append([int(maxH), int(maxW)])
+            maxH = inv.sum(0).max().item() # .item() 会触发同步，但在后处理中通常是必要的
+            maxW = inv.sum(1).max().item()
+            res.append(jt.array([int(maxH), int(maxW)]))
             
         return res
 
@@ -347,15 +335,6 @@ class NestedTensor(object):
     @property
     def device(self):
         return "cuda" if jt.flags.use_cuda else "cpu"
-
-
-def _max_by_axis(the_list):
-    # type: (List[List[int]]) -> List[int]
-    maxes = the_list[0]
-    for sublist in the_list[1:]:
-        for index, item in enumerate(sublist):
-            maxes[index] = max(maxes[index], item)
-    return maxes
 
 
 def nested_tensor_from_tensor_list(tensor_list: List):
@@ -409,11 +388,8 @@ def nested_tensor_from_tensor_list(tensor_list: List):
         for i, img in enumerate(tensor_list):
             c_i, h_i, w_i = img.shape
             # Jittor 的切片赋值
-            batch_tensor[i, :c_i, :h_i, :w_i] = img
+            batch_tensor[i, :c_i, :h_i, :w_i] = img.copy()
             batch_mask[i, :h_i, :w_i] = False # 0 = valid
-            
-        # Mask 必须切断梯度
-        batch_mask = batch_mask.stop_grad()
         
     else:
         # 输入是 Numpy (推荐路径 for DataLoader)
@@ -428,7 +404,7 @@ def nested_tensor_from_tensor_list(tensor_list: List):
             
         # 一次性转 Jittor
         batch_tensor = jt.array(batch_numpy)
-        batch_mask = jt.array(mask_numpy).stop_grad() # 显式 stop_grad
+        batch_mask = jt.array(mask_numpy)
 
     return NestedTensor(batch_tensor, batch_mask)
 
@@ -506,70 +482,24 @@ def init_distributed_mode(args):
     # also ensure printing only from main process
     setup_for_distributed(True)
 
-
+@jt.no_grad()
 def accuracy(output, target, topk=(1,)):
-    """
-    Computes the precision@k for the specified values of k.
-
-    Jittor port note:
-        Returns a list of jt.Var scalars to keep `.item()` semantics.
-    """
-    # Convert to numpy
-    if isinstance(output, jt.Var):
-        output_np = output.numpy()
-    else:
-        output_np = np.asarray(output)
-
-    if isinstance(target, jt.Var):
-        target_np = target.numpy()
-    else:
-        target_np = np.asarray(target)
-
-    if target_np.size == 0:
-        return [jt.float32([0.0]) for _ in topk]
-
-    # Ensure shape (N, C) for output and (N,) for target
-    if output_np.ndim != 2:
-        raise ValueError(f"accuracy expects output of shape (N, C), got {output_np.shape}")
-    target_np = target_np.reshape(-1)
-    batch_size = target_np.shape[0]
+    """Computes the precision@k for the specified values of k"""
+    if target.numel() == 0:
+        return [jt.zeros([], device=output.device)]
     maxk = max(topk)
+    batch_size = target.size(0)
 
-    # top-k indices for each sample (descending scores)
-    # shape: (N, maxk)
-    topk_idx = np.argsort(-output_np, axis=1)[:, :maxk]
+    _, pred = output.topk(maxk, 1, True, True)
+    pred = pred.t()
+    correct = pred.eq(target.view(1, -1).expand_as(pred))
 
     res = []
     for k in topk:
-        pred_k = topk_idx[:, :k]  # (N, k)
-        correct = (pred_k == target_np[:, None])
-        correct_k = np.any(correct, axis=1).sum()
-        acc = float(correct_k) * 100.0 / float(batch_size)
-        # 返回 1 元素 Var，外面可以 .item()
-        res.append(jt.float32([acc]))
+        correct_k = correct[:k].view(-1).float().sum(0)
+        res.append(correct_k.mul_(100.0 / batch_size))
     return res
 
-
-def accuracy_onehot(pred, gt):
-    """
-    Accuracy for one-hot predictions / labels.
-
-    Args:
-        pred: array-like of shape (N, C)
-        gt:   array-like of shape (N, C)
-
-    Returns:
-        Tensor-like scalar, percentage.
-    """
-    if not (hasattr(pred, "abs") and hasattr(pred, "sum") and hasattr(pred, "float")):
-        pred = jt.array(pred)
-    if not (hasattr(gt, "abs") and hasattr(gt, "sum") and hasattr(gt, "float")):
-        gt = jt.array(gt)
-    if pred.shape != gt.shape:
-        raise ValueError(f"pred and gt must have same shape, got {pred.shape} vs {gt.shape}")
-    tp = ((pred - gt).abs().sum(-1) < 1e-4).float().sum()
-    acc = tp / gt.shape[0] * 100
-    return acc
 def interpolate(input, size=None, scale_factor=None, mode="nearest", align_corners=None):
     """
     Wrapper around jittor.nn.interpolate with a PyTorch-like signature.
@@ -644,8 +574,6 @@ def inverse_sigmoid(x, eps=1e-3):
         x2 = np.clip(1.0 - x_arr, eps, None)
         return np.log(x1 / x2)
 def clean_state_dict(state_dict):
-    import jittor as jt
-    import torch
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
         if k[:7] == "module.":
@@ -658,8 +586,6 @@ def clean_state_dict(state_dict):
         # Only keep tensors, convert PyTorch tensors to Jittor
         if isinstance(v, jt.Var):
             new_state_dict[k] = v
-        elif isinstance(v, torch.Tensor):
-            new_state_dict[k] = jt.array(v.detach().cpu().numpy())
         elif isinstance(v, dict):
             # Recursively clean nested dicts
             new_state_dict[k] = clean_state_dict(v)

@@ -10,27 +10,6 @@ import jittor as jt
 import jittor.nn as nn
 
 
-def _linear_bmm_transpose(x: jt.Var, weight: jt.Var, bias: Optional[jt.Var] = None) -> jt.Var:
-    """
-    Apply a linear projection using bmm_transpose to avoid broadcasted matmul_transpose
-    on large 2D inputs.
-    """
-    x_shape = x.shape
-    if len(x_shape) == 2:
-        out = jt.bmm_transpose(x[None, ...], weight[None, ...])[0]
-        if bias is not None:
-            out = out + bias
-        return out
-    if len(x_shape) == 3:
-        bsz, seq_len, dim = x_shape
-        x2 = x.reshape(bsz * seq_len, dim)
-        out2 = jt.bmm_transpose(x2[None, ...], weight[None, ...])[0]
-        if bias is not None:
-            out2 = out2 + bias
-        return out2.reshape(bsz, seq_len, -1)
-    raise ValueError(f"Unsupported input rank for _linear_bmm_transpose: {x_shape}")
-
-
 class FeatureResizer(nn.Module):
     """
     This class takes as input a set of embeddings of dimension C1 and outputs a set of
@@ -85,7 +64,7 @@ def func_attention(query, context, smooth=1, raw_feature_norm="softmax", eps=1e-
     if raw_feature_norm == "softmax":
         # --> (batch*sourceL, queryL)
         attn = attn.view(batch_size * sourceL, queryL)
-        attn = nn.softmax(attn)
+        attn = nn.Softmax()(attn)
         # --> (batch, sourceL, queryL)
         attn = attn.view(batch_size, sourceL, queryL)
     elif raw_feature_norm == "l2norm":
@@ -96,14 +75,14 @@ def func_attention(query, context, smooth=1, raw_feature_norm="softmax", eps=1e-
     else:
         raise ValueError("unknown first norm type:", raw_feature_norm)
     # --> (batch, queryL, sourceL)
-    attn = jt.contiguous(jt.transpose(attn, 1, 2))
+    attn = jt.transpose(attn, 1, 2).contiguous()
     # --> (batch*queryL, sourceL)
     attn = attn.view(batch_size * queryL, sourceL)
-    attn = nn.softmax(attn * smooth)
+    attn = nn.Softmax()(attn * smooth)
     # --> (batch, queryL, sourceL)
     attn = attn.view(batch_size, queryL, sourceL)
     # --> (batch, sourceL, queryL)
-    attnT = jt.contiguous(jt.transpose(attn, 1, 2))
+    attnT = jt.transpose(attn, 1, 2).contiguous()
 
     # --> (batch, d, sourceL)
     contextT = jt.transpose(context, 1, 2)
@@ -147,7 +126,7 @@ class BiMultiHeadAttention(nn.Module):
         self._reset_parameters()
 
     def _shape(self, tensor: jt.Var, seq_len: int, bsz: int) -> jt.Var:
-        return jt.contiguous(tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2))
+        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
     def _reset_parameters(self):
         nn.init.xavier_uniform_(self.v_proj.weight)
@@ -163,7 +142,7 @@ class BiMultiHeadAttention(nn.Module):
         nn.init.xavier_uniform_(self.out_l_proj.weight)
         nn.init.zero_(self.out_l_proj.bias)
 
-    def execute(self, v: jt.Var, l: jt.Var, attention_mask_v: Optional[jt.Var], attention_mask_l: Optional[jt.Var]):
+    def execute(self, v: jt.Var, l: jt.Var, attention_mask_v: Optional[jt.Var]=None, attention_mask_l: Optional[jt.Var]=None):
         """_summary_
 
         Args:
@@ -226,17 +205,17 @@ class BiMultiHeadAttention(nn.Module):
             attention_mask_v = (
                 attention_mask_v[:, None, None, :].repeat(1, self.num_heads, 1, 1).flatten(0, 1)
             )
-            attn_weights_l: jt.Var = jt.masked_fill(attn_weights_l, attention_mask_v, float("-inf"))
+            attn_weights_l: jt.Var = attn_weights_l.masked_fill(attention_mask_v, float("-inf"))
 
-        attn_weights_l: jt.Var = nn.softmax(attn_weights_l, dim=-1)
+        attn_weights_l: jt.Var = attn_weights_l.softmax(dim=-1)
 
         # mask language for vision
         if attention_mask_l is not None:
             attention_mask_l = ( # though it has no highlight, it can actually work out
                 attention_mask_l[:, None, None, :].repeat(1, self.num_heads, 1, 1).flatten(0, 1)
             )
-            attn_weights = jt.masked_fill(attn_weights, attention_mask_l, float("-inf"))
-        attn_weights_v: jt.Var = nn.softmax(attn_weights, dim=-1)
+            attn_weights = attn_weights.masked_fill(attention_mask_l, float("-inf"))
+        attn_weights_v: jt.Var = attn_weights.softmax(dim=-1)
 
         attn_probs_v: jt.Var = nn.dropout(attn_weights_v, p=self.dropout, is_train=self.is_training)
         attn_probs_l: jt.Var = nn.dropout(attn_weights_l, p=self.dropout, is_train=self.is_training)
@@ -262,12 +241,8 @@ class BiMultiHeadAttention(nn.Module):
         attn_output_l = attn_output_l.transpose(1, 2)
         attn_output_l = attn_output_l.reshape(bsz, src_len, self.embed_dim)
 
-        attn_output_v = _linear_bmm_transpose(
-            attn_output_v, self.out_v_proj.weight, self.out_v_proj.bias
-        )
-        attn_output_l = _linear_bmm_transpose(
-            attn_output_l, self.out_l_proj.weight, self.out_l_proj.bias
-        )
+        attn_output_v = self.out_v_proj(attn_output_v) # remove the operations to ensure vm not overflow
+        attn_output_l = self.out_l_proj(attn_output_l) # remove the operations to ensure vm not overflow
 
         return attn_output_v, attn_output_l
 
@@ -307,7 +282,7 @@ class BiAttentionBlock(nn.Module):
         self.gamma_v: jt.Var = init_values * jt.ones((v_dim))
         self.gamma_l: jt.Var = init_values * jt.ones((l_dim))
 
-    def execute(self, v: jt.Var, l: jt.Var, attention_mask_v: Optional[jt.Var], attention_mask_l: Optional[jt.Var]) -> Tuple[jt.Var, jt.Var]:
+    def execute(self, v: jt.Var, l: jt.Var, attention_mask_v: Optional[jt.Var]=None, attention_mask_l: Optional[jt.Var]=None) -> Tuple[jt.Var, jt.Var]:
         v = self.layer_norm_v(v)
         l = self.layer_norm_l(l)
         delta_v, delta_l = self.attn(
@@ -319,5 +294,3 @@ class BiAttentionBlock(nn.Module):
         v = v + self.drop_path(self.gamma_v * delta_v)
         l = l + self.drop_path(self.gamma_l * delta_l)
         return v, l
-
-    # def execute(self, v:List[jt.Var], l, attention_mask_v=None, attention_mask_l=None)

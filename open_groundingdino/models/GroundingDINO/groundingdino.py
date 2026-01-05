@@ -22,17 +22,13 @@ from transformers import AutoTokenizer, BertModel, BertTokenizer, RobertaModel, 
 from util import box_ops, get_tokenlizer
 from util.misc import (
     NestedTensor,
-    accuracy,
     get_world_size,
-    interpolate,
     inverse_sigmoid,
     is_dist_avail_and_initialized,
     nested_tensor_from_tensor_list,
 )
 from util.utils import div_trunc, get_phrases_from_posmap
 from util.debug_tools import debug_enabled, log_tensor, log_text
-from util.visualizer import COCOVisualizer
-from util.vl_utils import create_positive_map_from_span
 
 from ..registry import MODULE_BUILD_FUNCS
 from .backbone import build_backbone
@@ -77,14 +73,6 @@ class GroundingDINO(nn.Module):
         sub_sentence_present=True,
         max_text_len=256,
     ):
-        """Initializes the model.
-        Parameters:
-            backbone: torch module of the backbone to be used. See backbone.py
-            transformer: torch module of the transformer architecture. See transformer.py
-            num_queries: number of object queries, ie detection slot. This is the maximal number of objects
-                         Conditional DETR can detect in a single image. For COCO, we recommend 100 queries.
-            aux_loss: True if auxiliary decoding losses (loss at each decoder layer) are to be used.
-        """
         super().__init__()
         self.num_queries = num_queries
         self.transformer = transformer
@@ -108,14 +96,15 @@ class GroundingDINO(nn.Module):
         # bert
         self.tokenizer = get_tokenlizer.get_tokenlizer(text_encoder_type)
         self.bert = get_tokenlizer.get_pretrained_language_model(text_encoder_type)
-        self.bert.pooler.dense.requires_grad_(False)
+        # Jittor use stop_grad() method
+        self.bert.pooler.dense.weight.stop_grad() 
+        self.bert.pooler.dense.bias.stop_grad() 
         self.bert = BertModelWarper(bert_model=self.bert)
 
         self.feat_map = nn.Linear(self.bert.config.hidden_size, self.hidden_dim, bias=True)
         nn.init.constant_(self.feat_map.bias, 0)
         nn.init.xavier_uniform_(self.feat_map.weight)
-        # freeze
-
+        
         # special tokens
         self.specical_tokens = self.tokenizer.convert_tokens_to_ids(["[CLS]", "[SEP]", ".", "?"])
 
@@ -127,7 +116,7 @@ class GroundingDINO(nn.Module):
                 in_channels = backbone.num_channels[_]
                 input_proj_list.append(
                     nn.Sequential(
-                        nn.Conv(in_channels, hidden_dim, kernel_size=1),
+                        nn.Conv2d(in_channels, hidden_dim, kernel_size=1),
                         nn.GroupNorm(32, hidden_dim),
                     )
                 )
@@ -139,13 +128,14 @@ class GroundingDINO(nn.Module):
                     )
                 )
                 in_channels = hidden_dim
-            self.input_proj = nn.Sequential(input_proj_list)
+            # [修正] 使用 ModuleList 而不是 Sequential，因为它们是并行分支
+            self.input_proj = nn.ModuleList(input_proj_list)
         else:
             assert two_stage_type == "no", "two_stage_type should be no if num_feature_levels=1 !!!"
-            self.input_proj = nn.Sequential(
+            self.input_proj = nn.ModuleList(
                 [
                     nn.Sequential(
-                        nn.Conv(backbone.num_channels[-1], hidden_dim, kernel_size=1),
+                        nn.Conv2d(backbone.num_channels[-1], hidden_dim, kernel_size=1),
                         nn.GroupNorm(32, hidden_dim),
                     )
                 ]
@@ -174,8 +164,9 @@ class GroundingDINO(nn.Module):
                 copy.deepcopy(_bbox_embed) for i in range(transformer.num_decoder_layers)
             ]
         class_embed_layerlist = [_class_embed for i in range(transformer.num_decoder_layers)]
-        self.bbox_embed = nn.Sequential(box_embed_layerlist)
-        self.class_embed = nn.Sequential(class_embed_layerlist)
+        # [修正] 使用 ModuleList
+        self.bbox_embed = nn.ModuleList(box_embed_layerlist)
+        self.class_embed = nn.ModuleList(class_embed_layerlist)
         self.transformer.decoder.bbox_embed = self.bbox_embed
         self.transformer.decoder.class_embed = self.class_embed
 
@@ -211,20 +202,6 @@ class GroundingDINO(nn.Module):
         self.refpoint_embed = nn.Embedding(use_num_queries, self.query_dim)
 
     def execute(self, samples: NestedTensor, targets: List = None, **kw):
-        """The execute expects a NestedTensor, which consists of:
-           - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
-           - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
-
-        It returns a dict with the following elements:
-           - "pred_logits": the classification logits (including no-object) for all queries.
-                            Shape= [batch_size x num_queries x num_classes]
-           - "pred_boxes": The normalized boxes coordinates for all queries, represented as
-                           (center_x, center_y, width, height). These values are normalized in [0, 1],
-                           relative to the size of each individual image (disregarding possible padding).
-                           See PostProcess for information on how to retrieve the unnormalized bounding box.
-           - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
-                            dictionnaries containing the two above keys for each decoder layer.
-        """
         if targets is None:
             captions = kw["captions"]
         else:
@@ -260,16 +237,11 @@ class GroundingDINO(nn.Module):
             tokenized_for_encoder = tokenized
 
         bert_output = self.bert(**tokenized_for_encoder)  # bs, 195, 768
-        print("Bert Done!")
-
+        
         last_hidden_state = bert_output["last_hidden_state"]
         encoded_text = self.feat_map(last_hidden_state)
         text_token_mask = tokenized.attention_mask.bool()  # bs, 195
-        # text_token_mask: True for nomask, False for mask
-        # text_self_attention_masks: True for nomask, False for mask
         
-        print("Feat Map Done!")
-
         if encoded_text.shape[1] > self.max_text_len:
             encoded_text = encoded_text[:, : self.max_text_len, :]
             text_token_mask = text_token_mask[:, : self.max_text_len]
@@ -285,18 +257,14 @@ class GroundingDINO(nn.Module):
             "text_self_attention_masks": text_self_attention_masks,  # bs, 195,195
         }
 
-
         if isinstance(samples, (list, jt.Var)):
             samples = nested_tensor_from_tensor_list(samples)
         features, poss = self.backbone(samples)
-        assert isinstance(poss, list)
+
         srcs = []
         masks = []
         for l, feat in enumerate(features):
-            assert isinstance(feat, NestedTensor)
             src, mask = feat.decompose()
-            if not isinstance(src, jt.Var):
-                src = jt.array(src)
             srcs.append(self.input_proj[l](src))
             masks.append(mask)
             assert mask is not None
@@ -304,24 +272,28 @@ class GroundingDINO(nn.Module):
             _len_srcs = len(srcs)
             for l in range(_len_srcs, self.num_feature_levels):
                 if l == _len_srcs:
-                    src = self.input_proj[l](jt.array(features[-1].tensors))
+                    # [修正] 移除 jt.array()
+                    src = self.input_proj[l](features[-1].tensors)
                 else:
                     src = self.input_proj[l](srcs[-1])
                 m = samples.mask
-                mask = nn.interpolate(jt.array(m[None], dtype=jt.float32), size=src.shape[-2:]).bool()[0]
-                pos_l = jt.type_as(self.backbone[1](NestedTensor(src, mask)), src)
+                # [修正] mask插值逻辑，使用 unsqueeze(1) 替代 [None] 更清晰
+                # 必须转换为 float32 进行插值，然后再转回 bool
+                mask = nn.interpolate(m.unsqueeze(1).float(), size=src.shape[-2:]).bool().squeeze(1)
+                
+                # [修正] 修正 jt.type_as 调用 -> cast
+                # Jittor 中 interpolate 的结果已经是 var，可以直接用
+                pos_l = self.backbone[1](NestedTensor(src, mask)).cast(src.dtype)
+                
                 srcs.append(src)
                 masks.append(mask)
                 poss.append(pos_l)
             
-        print("Backbone Done!")
 
         input_query_bbox = input_query_label = attn_mask = dn_meta = None
         hs, reference, hs_enc, ref_enc, init_box_proposal = self.transformer(
             srcs, masks, input_query_bbox, poss, input_query_label, attn_mask, text_dict
         )
-
-        print("Transformer Done!")
         
         # deformable-detr-like anchor update
         outputs_coord_list = []
@@ -330,11 +302,9 @@ class GroundingDINO(nn.Module):
         ):
             layer_delta_unsig = layer_bbox_embed(layer_hs)
             layer_outputs_unsig = layer_delta_unsig + inverse_sigmoid(layer_ref_sig)
-            assert isinstance(layer_outputs_unsig, jt.Var)
             layer_outputs_unsig = layer_outputs_unsig.sigmoid()
             outputs_coord_list.append(layer_outputs_unsig)
         outputs_coord_list = jt.stack(outputs_coord_list)
-
 
         outputs_class = jt.stack(
             [
@@ -347,13 +317,11 @@ class GroundingDINO(nn.Module):
 
         # Used to calculate losses
         bs, len_td = text_dict['text_token_mask'].shape
-        # [修改] 使用 concat 替代 setitem
+        
         if len_td < self.max_text_len:
             pad_len = self.max_text_len - len_td
-            # 注意: text_token_mask 中 1 是有效，0 是 padding (假设)
-            # 或者 0 是 padding? 根据原代码 zeros 填充，说明 padding 部分是 False/0
             pad = jt.zeros((bs, pad_len), dtype=text_dict['text_token_mask'].dtype)
-            # 确保类型一致
+            # [修正] 修正 type_as -> cast
             if text_dict['text_token_mask'].dtype != pad.dtype:
                 pad = pad.cast(text_dict['text_token_mask'].dtype)
             
@@ -361,7 +329,6 @@ class GroundingDINO(nn.Module):
         else:
             out['text_mask'] = text_dict['text_token_mask'][:, :self.max_text_len]
             
-        # 确保转为 bool
         out['text_mask'] = out['text_mask'].bool()
 
         # for intermediate outputs
@@ -372,43 +339,10 @@ class GroundingDINO(nn.Module):
         if hs_enc is not None:
             # prepare intermediate outputs
             interm_coord = ref_enc[-1]
-            print("Transformer.enc_out_class_embed Start!")
             interm_class = self.transformer.enc_out_class_embed(hs_enc[-1], text_dict)
             out['interm_outputs'] = {'pred_logits': interm_class, 'pred_boxes': interm_coord}
             out['interm_outputs_for_matching_pre'] = {'pred_logits': interm_class, 'pred_boxes': init_box_proposal}
 
-        # outputs['pred_logits'].shape
-        # torch.Size([4, 900, 256])
-
-        # outputs['pred_boxes'].shape
-        # torch.Size([4, 900, 4])
-
-        # outputs['text_mask'].shape
-        # torch.Size([256])
-
-        # outputs['text_mask']
-
-        # outputs['aux_outputs'][0].keys()
-        # dict_keys(['pred_logits', 'pred_boxes', 'one_hot', 'text_mask'])
-
-        # outputs['aux_outputs'][img_idx]
-
-        # outputs['token']
-        # <class 'transformers.tokenization_utils_base.BatchEncoding'>
-
-        # outputs['interm_outputs'].keys()
-        # dict_keys(['pred_logits', 'pred_boxes', 'one_hot', 'text_mask'])
-
-
-        # outputs['interm_outputs_for_matching_pre'].keys()
-        # dict_keys(['pred_logits', 'pred_boxes'])
-
-        # outputs['one_hot'].shape
-        # torch.Size([4, 900, 256])
-        
-        # ================= [新增] Jittor 数值保护 =================
-        # 强制截断 logits，防止 Sigmoid 后出现绝对的 0 或 1，导致 Loss 计算 log(0)
-        # 同时防止 inf 传入 Matcher 导致索引越界
         safe_min = -100.0
         safe_max = 100.0
         
@@ -674,7 +608,7 @@ class SetCriterion(nn.Module):
                 log_text("Criterion Main Matcher After Line 10")
                 
                 # Scatter Update
-                current_one_hot = current_one_hot.scatter(0, index_matrix, matched_maps.cast(jt.int64)) # although no highlight, it is valid to use jt.Var.scatter()
+                current_one_hot = current_one_hot.scatter(0, index_matrix, matched_maps.int64()) # although no highlight, it is valid to use jt.Var.scatter()
                 log_text("Criterion Main Matcher After Line 11")
             
             one_hot_list.append(current_one_hot)
@@ -753,7 +687,7 @@ class SetCriterion(nn.Module):
                         matched_maps = label_map_list[i][current_tgt_ids]
                         
                         index_matrix = pred_idx.unsqueeze(1).repeat(1, dim)
-                        current_one_hot = current_one_hot.scatter(0, index_matrix, matched_maps.cast(jt.int64))
+                        current_one_hot = current_one_hot.scatter(0, index_matrix, matched_maps.int64())
                     one_hot_aux_list.append(current_one_hot)
                 
                 aux_outputs['one_hot'] = jt.stack(one_hot_aux_list, dim=0)
@@ -837,7 +771,7 @@ class SetCriterion(nn.Module):
                     matched_maps = label_map_list[i][current_tgt_ids]
                     
                     index_matrix = pred_idx.unsqueeze(1).repeat(1, dim)
-                    current_one_hot = current_one_hot.scatter(0, index_matrix, matched_maps.cast(jt.int64))
+                    current_one_hot = current_one_hot.scatter(0, index_matrix, matched_maps.int64())
                 one_hot_interm_list.append(current_one_hot)
 
             interm_outputs['one_hot'] = jt.stack(one_hot_interm_list, dim=0)
@@ -864,7 +798,7 @@ class SetCriterion(nn.Module):
 
 class PostProcess(nn.Module):
     """ This module converts the model's output into the format expected by the coco api"""
-    def __init__(self, num_select=100,text_encoder_type='text_encoder_type', nms_iou_threshold=-1,use_coco_eval=False,args=None) -> None:
+    def __init__(self, num_select=100, text_encoder_type='text_encoder_type', nms_iou_threshold=-1, use_coco_eval=False, args=None) -> None:
         super().__init__()
         self.num_select = num_select
         self.tokenizer = get_tokenlizer.get_tokenlizer(text_encoder_type)
@@ -874,46 +808,44 @@ class PostProcess(nn.Module):
             category_dict = coco.loadCats(coco.getCatIds())
             cat_list = [item['name'] for item in category_dict]
         else:
-            cat_list=args.label_list
+            cat_list = args.label_list
         caption = " . ".join(cat_list) + ' .'
         tokenized = self.tokenizer(caption, padding="longest", return_tensors="pt")
+        # 修改1: 保持使用jt创建数据
         label_list = jt.arange(len(cat_list))
-        pos_map=create_positive_map(tokenized,label_list,cat_list,caption)
-        # build a mapping from label_id to pos_map
+        # 假设 create_positive_map 已经适配了 jittor 或者返回 numpy/list
+        pos_map = create_positive_map(tokenized, label_list, cat_list, caption)
+        
         if args.use_coco_eval:
             id_map = {0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 9, 9: 10, 10: 11, 11: 13, 12: 14, 13: 15, 14: 16, 15: 17, 16: 18, 17: 19, 18: 20, 19: 21, 20: 22, 21: 23, 22: 24, 23: 25, 24: 27, 25: 28, 26: 31, 27: 32, 28: 33, 29: 34, 30: 35, 31: 36, 32: 37, 33: 38, 34: 39, 35: 40, 36: 41, 37: 42, 38: 43, 39: 44, 40: 46,
                     41: 47, 42: 48, 43: 49, 44: 50, 45: 51, 46: 52, 47: 53, 48: 54, 49: 55, 50: 56, 51: 57, 52: 58, 53: 59, 54: 60, 55: 61, 56: 62, 57: 63, 58: 64, 59: 65, 60: 67, 61: 70, 62: 72, 63: 73, 64: 74, 65: 75, 66: 76, 67: 77, 68: 78, 69: 79, 70: 80, 71: 81, 72: 82, 73: 84, 74: 85, 75: 86, 76: 87, 77: 88, 78: 89, 79: 90}
             new_pos_map = jt.zeros((91, 256))
             for k, v in id_map.items():
                 new_pos_map[v] = pos_map[k]
-            pos_map=new_pos_map
+            pos_map = new_pos_map
 
-
-        self.nms_iou_threshold=nms_iou_threshold
+        self.nms_iou_threshold = nms_iou_threshold
         self.positive_map = pos_map
 
     @jt.no_grad()
     def execute(self, outputs, target_sizes, not_to_xyxy=False, test=False):
-        """ Perform the computation
-        Parameters:
-            outputs: raw outputs of the model
-            target_sizes: tensor of dimension [batch_size x 2] containing the size of each images of the batch
-                          For evaluation, this must be the original image size (before any data augmentation)
-                          For visualization, this should be the image size after data augment, but before padding
-        """
+        """ Perform the computation """
         assert isinstance(target_sizes, jt.Var)
         num_select = self.num_select
         out_logits, out_bbox = outputs['pred_logits'], outputs['pred_boxes']
 
         assert isinstance(out_logits, jt.Var)
         prob_to_token = out_logits.sigmoid()
+        
+        # 修改2: 向量化处理 pos_maps 的归一化，避免循环赋值（Jittor中虽然支持但也推荐向量化）
         pos_maps = self.positive_map
-        for label_ind in range(len(pos_maps)):
-            assert isinstance(pos_maps[label_ind], jt.Var)
-            if pos_maps[label_ind].sum() != 0:
-                pos_maps[label_ind]=pos_maps[label_ind]/pos_maps[label_ind].sum()
+        pm_sum = pos_maps.sum(dim=1, keepdims=True)
+        # 如果sum!=0，则除以sum，否则保持原值
+        pos_maps = jt.where(pm_sum != 0, pos_maps / pm_sum, pos_maps)
 
-        prob_to_label = nn.matmul_transpose(prob_to_token, pos_maps)
+        # 修改3: 修正矩阵乘法。PyTorch中是 @ pos_maps.T，Jittor中需显式转置
+        # prob_to_token: [B, N, 256], pos_maps: [91, 256] -> [256, 91]
+        prob_to_label = prob_to_token @ pos_maps.transpose(0, 1)
 
         assert len(out_logits) == len(target_sizes)
         assert target_sizes.shape[1] == 2
@@ -921,31 +853,44 @@ class PostProcess(nn.Module):
         prob = prob_to_label
         topk_values, topk_indexes = jt.topk(prob.view(prob.shape[0], -1), num_select, dim=1)
         scores = topk_values
-        topk_boxes = div_trunc(topk_indexes, prob.shape[2])
+        
+        # 修改4: 使用 // 替代未定义的 div_trunc，实现截断除法
+        topk_boxes = topk_indexes // prob.shape[2]
         labels = topk_indexes % prob.shape[2]
+        
         if not_to_xyxy:
             boxes = out_bbox
         else:
             boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
 
-        # if test:
-        #     assert not not_to_xyxy
-        #     boxes[:,:,2:] = boxes[:,:,2:] - boxes[:,:,:2]
         assert isinstance(topk_boxes, jt.Var)
-        boxes = jt.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))
+        # Gather 用法正确，保持不变
+        boxes = jt.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1, 1, 4))
         
-        # and from relative [0, 1] to absolute [0, height] coordinates
         img_h, img_w = jt.unbind(target_sizes, 1)
         scale_fct = jt.stack([img_w, img_h, img_w, img_h], dim=1)
         boxes = boxes * scale_fct[:, None, :]
 
+        # 修改5: 修正NMS逻辑
         if self.nms_iou_threshold > 0:
-            item_indices = [jt.nms((x1, y1, x2, y2, s), thresh=self.nms_iou_threshold) for (x1, y1, x2, y2), s in zip(boxes, scores)]
-
-            results = [{'scores': s[i], 'labels': l[i], 'boxes': b[i]} for s, l, b, i in zip(scores, labels, boxes, item_indices)]
+            results = []
+            for b, s, l in zip(boxes, scores, labels):
+                # Jittor NMS 要求输入形状为 [N, 5] (x1, y1, x2, y2, score)
+                # s 是 [N], 需要变为 [N, 1] 然后拼接
+                dets = jt.concat([b, s.unsqueeze(1)], dim=1)
+                
+                # 执行NMS，返回保留的索引
+                keep_indices = jt.nms(dets, thresh=self.nms_iou_threshold)
+                
+                results.append({
+                    'scores': s[keep_indices],
+                    'labels': l[keep_indices],
+                    'boxes': b[keep_indices]
+                })
         else:
             results = [{'scores': s, 'labels': l, 'boxes': b} for s, l, b in zip(scores, labels, boxes)]
-        results = [{'scores': s, 'labels': l, 'boxes': b} for s, l, b in zip(scores, labels, boxes)]
+            
+        # 注意: 删除了原代码末尾重复的 results = ... 行，否则上面的 NMS 逻辑会被覆盖无效
         return results
 
 
@@ -1030,23 +975,28 @@ def build_groundingdino(args):
 
     return model, criterion, postprocessors
 
-def create_positive_map(tokenized, tokens_positive,cat_list,caption):
+def create_positive_map(tokenized, tokens_positive, cat_list, caption):
     """construct a map such that positive_map[i,j] = True iff box i is associated to token j"""
+    # 保持 jt.zeros
     positive_map = jt.zeros((len(tokens_positive), 256), dtype=jt.float32)
     max_text_len = int(positive_map.shape[1])
+    
     for j, label in enumerate(tokens_positive):
+        # --- Label 转换逻辑保持你写的即可，这部分是正确的 ---
         if isinstance(label, jt.Var):
-            if label.ndim != 0:
-                label = label.reshape(-1)[0]
-            label = label.numpy().item()
+            # 简化写法：直接使用 .item() 即可触发同步获取数值
+            label = label.item()
         elif hasattr(label, "item"):
             label = label.item()
         label = int(label)
+        
         if label < 0 or label >= len(cat_list):
             continue
+            
         start_ind = caption.find(cat_list[label])
         end_ind = start_ind + len(cat_list[label]) - 1
         beg_pos = tokenized.char_to_token(start_ind)
+        
         try:
             end_pos = tokenized.char_to_token(end_ind)
         except:
@@ -1058,25 +1008,7 @@ def create_positive_map(tokenized, tokens_positive,cat_list,caption):
                     end_pos = tokenized.char_to_token(end_ind - 2)
             except:
                 end_pos = None
-        # except Exception as e:
-        #     print("beg:", beg, "end:", end)
-        #     print("token_positive:", tokens_positive)
-        #     # print("beg_pos:", beg_pos, "end_pos:", end_pos)
-        #     raise e
-        # if beg_pos is None:
-        #     try:
-        #         beg_pos = tokenized.char_to_token(beg + 1)
-        #         if beg_pos is None:
-        #             beg_pos = tokenized.char_to_token(beg + 2)
-        #     except:
-        #         beg_pos = None
-        # if end_pos is None:
-        #     try:
-        #         end_pos = tokenized.char_to_token(end - 2)
-        #         if end_pos is None:
-        #             end_pos = tokenized.char_to_token(end - 3)
-        #     except:
-        #         end_pos = None
+
         if beg_pos is None or end_pos is None:
             continue
         if beg_pos < 0 or end_pos < 0:
@@ -1087,6 +1019,10 @@ def create_positive_map(tokenized, tokens_positive,cat_list,caption):
             continue
         if end_pos >= max_text_len:
             end_pos = max_text_len - 1
-        # assert beg_pos is not None and end_pos is not None
-        positive_map[j,beg_pos: end_pos + 1].fill_(1)
-    return positive_map 
+            
+        # --- 修改重点 ---
+        # 错误: positive_map[j,beg_pos: end_pos + 1].fill_(1)
+        # 正确: Jittor 支持直接切片赋值
+        positive_map[j, beg_pos: end_pos + 1] = 1.0
+
+    return positive_map

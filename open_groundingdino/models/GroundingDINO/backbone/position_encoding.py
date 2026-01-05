@@ -49,7 +49,7 @@ class PositionEmbeddingSine(nn.Module):
         x = tensor_list.tensors
         mask = tensor_list.mask
         assert mask is not None
-        not_mask = jt.array(~mask)
+        not_mask = jt.logical_not(mask)
         y_embed = not_mask.cumsum(1).float()
         x_embed = not_mask.cumsum(2).float()
         if self.normalize:
@@ -101,9 +101,7 @@ class PositionEmbeddingSineHW(nn.Module):
         x = tensor_list.tensors
         mask = tensor_list.mask
         assert mask is not None
-        if isinstance(mask, jt.Var):
-            mask = mask.numpy()
-        not_mask = jt.array(~mask)
+        not_mask = jt.logical_not(mask)
         y_embed = not_mask.cumsum(1).float()
         x_embed = not_mask.cumsum(2).float()
 

@@ -98,10 +98,11 @@ def load_image(image_path: str):
     assert isinstance(image, np.ndarray)
     log_text(f"load_image: raw type={type(image)}")
     log_tensor("image", image)
-    if hasattr(image, 'numpy'):
-        image = jt.array(image.numpy())
-    else:
-        image = jt.array(image)
+    if not isinstance(image, jt.Var):
+        if hasattr(image, 'numpy'):
+            image = jt.array(image.numpy())
+        else:
+            image = jt.array(image)
     # Add batch dimension
     assert isinstance(image, jt.Var)
     log_text(f"load_image: jt type={type(image)}")

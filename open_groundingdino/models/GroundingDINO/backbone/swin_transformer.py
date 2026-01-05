@@ -16,7 +16,7 @@ import numpy as np
 import math
 import jittor as jt
 import jittor.nn as nn
-import jittor.nn as F
+
 
 from util.misc import NestedTensor
 
@@ -118,7 +118,7 @@ class WindowAttention(nn.Module):
         relative_coords[:, :, 1] += self.window_size[1] - 1
         relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
         relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
-        self.register_buffer("relative_position_index", relative_position_index)
+        self.relative_position_index = relative_position_index.stop_grad()
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
@@ -251,7 +251,7 @@ class SwinTransformerBlock(nn.Module):
         pad_l = pad_t = 0
         pad_r = (self.window_size - W % self.window_size) % self.window_size
         pad_b = (self.window_size - H % self.window_size) % self.window_size
-        x = F.pad(x, (0, 0, pad_l, pad_r, pad_t, pad_b))
+        x = nn.pad(x, (0, 0, pad_l, pad_r, pad_t, pad_b))
         _, Hp, Wp, _ = x.shape
 
         # cyclic shift
@@ -322,7 +322,7 @@ class PatchMerging(nn.Module):
         # padding
         pad_input = (H % 2 == 1) or (W % 2 == 1)
         if pad_input:
-            x = F.pad(x, (0, 0, 0, W % 2, 0, H % 2))
+            x = nn.pad(x, (0, 0, 0, W % 2, 0, H % 2))
 
         x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 C
         x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 C
@@ -440,9 +440,8 @@ class BasicLayer(nn.Module):
         )  # nW, window_size, window_size, 1
         mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
         attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-        attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(
-            attn_mask == 0, float(0.0)
-        )
+        attn_mask = jt.masked_fill(attn_mask, attn_mask != 0, -100.0)
+        attn_mask = jt.masked_fill(attn_mask, attn_mask == 0, 0.0)
 
         for blk in self.blocks:
             blk.H, blk.W = H, W
@@ -485,9 +484,9 @@ class PatchEmbed(nn.Module):
         # padding
         _, _, H, W = x.shape
         if W % self.patch_size[1] != 0:
-            x = F.pad(x, (0, self.patch_size[1] - W % self.patch_size[1]))
+            x = nn.pad(x, (0, self.patch_size[1] - W % self.patch_size[1]))
         if H % self.patch_size[0] != 0:
-            x = F.pad(x, (0, 0, 0, self.patch_size[0] - H % self.patch_size[0]))
+            x = nn.pad(x, (0, 0, 0, self.patch_size[0] - H % self.patch_size[0]))
 
         x = self.proj(x)  # B C Wh Ww
         if self.norm is not None:
@@ -635,7 +634,7 @@ class SwinTransformer(nn.Module):
                 param.stop_grad()
 
         if self.frozen_stages >= 1 and self.ape:
-            self.absolute_pos_embed.stop_grad = False
+            self.absolute_pos_embed.stop_grad()
 
         if self.frozen_stages >= 2:
             self.pos_drop.eval()
@@ -652,7 +651,7 @@ class SwinTransformer(nn.Module):
         Wh, Ww = x.shape[2], x.shape[3]
         if self.ape:
             # interpolate the position embedding to the corresponding size
-            absolute_pos_embed = F.interpolate(
+            absolute_pos_embed = nn.interpolate(
                 self.absolute_pos_embed, size=(Wh, Ww), mode="bicubic"
             )
             x = (x + absolute_pos_embed).flatten(2).transpose(1, 2)  # B Wh*Ww C
@@ -689,7 +688,7 @@ class SwinTransformer(nn.Module):
         Wh, Ww = x.shape[2], x.shape[3]
         if self.ape:
             # interpolate the position embedding to the corresponding size
-            absolute_pos_embed = F.interpolate(
+            absolute_pos_embed = nn.interpolate(
                 self.absolute_pos_embed, size=(Wh, Ww), mode="bicubic"
             )
             x = (x + absolute_pos_embed).flatten(2).transpose(1, 2)  # B Wh*Ww C
@@ -719,8 +718,8 @@ class SwinTransformer(nn.Module):
         for idx, out_i in enumerate(outs):
             m = tensor_list.mask
             assert m is not None
-            mask = F.interpolate(jt.array(m)[None].float(), size=out_i.shape[-2:]).bool()[0]
-            outs_dict[idx] = NestedTensor(out_i, mask.numpy())
+            mask = nn.interpolate(jt.array(m)[None].float(), size=out_i.shape[-2:]).bool()[0]
+            outs_dict[idx] = NestedTensor(out_i, mask)
         return outs_dict
 
     def train(self, mode=True):

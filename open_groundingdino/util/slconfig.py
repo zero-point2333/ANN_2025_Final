@@ -13,6 +13,9 @@ from importlib import import_module
 from addict import Dict
 from yapf.yapflib.yapf_api import FormatCode
 
+import platform
+MACOS, LINUX, WINDOWS = (platform.system() == x for x in ['Darwin', 'Linux', 'Windows'])
+
 BASE_KEY = "_base_"
 DELETE_KEY = "_delete_"
 RESERVED_KEYS = ["filename", "text", "pretty_text", "get", "dump", "merge_from_dict"]
@@ -81,7 +84,7 @@ class SLConfig(object):
             with tempfile.TemporaryDirectory() as temp_config_dir:
                 temp_config_file = tempfile.NamedTemporaryFile(dir=temp_config_dir, suffix=".py")
                 temp_config_name = osp.basename(temp_config_file.name)
-                if os.name == 'nt':
+                if WINDOWS:
                     temp_config_file.close()
                 shutil.copyfile(filename, osp.join(temp_config_dir, temp_config_name))
                 temp_module_name = osp.splitext(temp_config_name)[0]

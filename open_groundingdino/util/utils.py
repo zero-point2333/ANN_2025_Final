@@ -6,7 +6,6 @@ from copy import deepcopy
 from typing import Any, Dict, List
 
 import numpy as np
-import torch
 import jittor as jt
 from jittor import nn
 from transformers import AutoTokenizer
@@ -36,9 +35,7 @@ def clean_state_dict(state_dict):
         # Handle backbone naming difference: backbone.0 -> backbone.backbone
         if k.startswith("backbone.0"):
             k = k.replace("backbone.0", "backbone.backbone", 1)
-        if isinstance(v, torch.Tensor):
-            new_state_dict[k] = jt.array(v.detach().cpu().numpy())
-        elif isinstance(v, dict):
+        if isinstance(v, dict):
             # Recursively clean nested dicts
             new_state_dict[k] = clean_state_dict(v)
         else:
@@ -47,8 +44,8 @@ def clean_state_dict(state_dict):
 
 
 def renorm(
-    img: jt.array, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-) -> jt.array:
+    img: jt.Var, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+) -> jt.Var:
     """
     img: jt.Var with shape (3,H,W) or (B,3,H,W)
     return: same shape as img
@@ -418,7 +415,7 @@ class ModelEma(nn.Module):
             for ema_v, model_v in zip(
                 self.module.state_dict().values(), model.state_dict().values()
             ):
-                ema_v.update(update_fn(ema_v, model_v))
+                ema_v = update_fn(ema_v, model_v).copy()
 
     def update(self, model):
         self._update(model, update_fn=lambda e, m: self.decay * e + (1.0 - self.decay) * m)
@@ -499,28 +496,6 @@ class BestMetricHolder:
 
     def __str__(self) -> str:
         return self.__repr__()
-
-
-def targets_to(targets: List[Dict[str, Any]], device):
-
-    excluded_keys = [
-        "questionId",
-        "tokens_positive",
-        "strings_positive",
-        "tokens",
-        "dataset_name",
-        "sentence_id",
-        "original_img_id",
-        "nb_eval",
-        "task_id",
-        "original_id",
-        "token_span",
-        "caption",
-        "dataset_type",
-    ]
-    return [
-        {k: v if k not in excluded_keys else v for k, v in t.items()} for t in targets
-    ]
 
 
 def get_phrases_from_posmap(

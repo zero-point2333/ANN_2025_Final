@@ -68,31 +68,50 @@ class FrozenBatchNorm2d(nn.Module):
 class IntermediateLayerGetter(nn.Module):
     """
     Module wrapper that returns intermediate layers from a model.
-    Adapted for Jittor from torchvision.models._utils.IntermediateLayerGetter.
+    Adapted for Jittor.
     """
     def __init__(self, model: nn.Module, return_layers: Dict[str, str]) -> None:
-        if not set(return_layers).issubset([name for name, _ in model.named_children()]):
+        super().__init__() # 1. Jittor 初始化不传参
+        
+        # 检查 return_layers 是否存在于 model 中
+        # 注意：Jittor 的 named_children 用法与 PyTorch 基本一致
+        model_layers = [name for name, _ in model.named_children()]
+        if not set(return_layers).issubset(model_layers):
             raise ValueError("return_layers are not present in model")
-        orig_return_layers = return_layers
-        return_layers = {str(k): str(v) for k, v in return_layers.items()}
-        layers = OrderedDict()
+
+        self.return_layers = return_layers
+        
+        # 用于记录我们需要执行的层的名字顺序
+        self.layer_names = []
+
+        # 2. 手动遍历并注册层
+        # 逻辑：复制 backbone 的层到当前模块，直到覆盖所有需要的 return_layers
+        temp_return_layers = return_layers.copy()
         for name, module in model.named_children():
-            layers[name] = module
-            if name in return_layers:
-                del return_layers[name]
-            if not return_layers:
+            # 关键：使用 setattr 将 module 注册为当前类的属性
+            # 这样 Jittor 才能管理这些参数 (save/load/optimizer)
+            setattr(self, name, module)
+            self.layer_names.append(name)
+            
+            if name in temp_return_layers:
+                del temp_return_layers[name]
+            if not temp_return_layers:
                 break
 
-        super().__init__(layers)
-        self.return_layers = orig_return_layers
-
-    def forward(self, x):
+    def execute(self, x): 
         out = OrderedDict()
-        for name, module in self.items():
+        
+        # 4. 按照记录的顺序执行
+        for name in self.layer_names:
+            # 通过 getattr 获取层
+            module = getattr(self, name)
             x = module(x)
+            
+            # 如果当前层是我们需要提取特征的层
             if name in self.return_layers:
                 out_name = self.return_layers[name]
                 out[out_name] = x
+                
         return out
 
 
@@ -185,6 +204,8 @@ class Backbone(BackboneBase):
                 pretrained=is_main_process(),
                 norm_layer=batch_norm,
             )
+            # 添加注释
+            print("init backbone successfully")
         else:
             raise NotImplementedError("Why you can get here with name {}".format(name))
         
