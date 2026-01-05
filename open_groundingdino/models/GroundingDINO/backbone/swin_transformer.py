@@ -222,7 +222,7 @@ class SwinTransformerBlock(nn.Module):
             proj_drop=drop,
         )
 
-        self.drop_path = nn.Dropout(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.drop_path = nn.DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(

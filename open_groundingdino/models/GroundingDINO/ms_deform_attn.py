@@ -24,7 +24,7 @@ def _is_power_of_2(n):
 # Python fallback (core implementation)
 # ------------------------------------------------------------------------
 
-def multi_scale_deformable_attn_pytorch(
+def multi_scale_deformable_attn_jittor(
     value: jt.Var,
     value_spatial_shapes: jt.Var,
     sampling_locations: jt.Var,
@@ -36,7 +36,7 @@ def multi_scale_deformable_attn_pytorch(
     """
 
     bs, _, num_heads, embed_dims = value.shape
-    _, num_queries, _, num_levels, num_points, _ = sampling_locations.shape
+    _, num_queries, num_heads, num_levels, num_points, _ = sampling_locations.shape
 
     # split value by levels
     spatial_shapes = value_spatial_shapes.tolist()
@@ -50,19 +50,17 @@ def multi_scale_deformable_attn_pytorch(
     for level, (H_, W_) in enumerate(spatial_shapes):
         # (bs, H*W, heads, dim) -> (bs*heads, dim, H, W)
         value_l = (
-            value_list[level]
-            .reshape(bs, H_ * W_, num_heads * embed_dims)
+            jt.flatten(value_list[level], 2)
             .transpose(1, 2)
             .reshape(bs * num_heads, embed_dims, H_, W_)
         )
         # (bs, queries, heads, points, 2)
         sampling_grid_l = (
-            sampling_grids[:, :, :, level]
-            .transpose(1, 2)
-            .reshape(bs * num_heads, num_queries, num_points, 2)
+            jt.flatten(sampling_grids[:, :, :, level]
+            .transpose(1, 2), 0, 1)
         )
-        sampling_grid_l = sampling_grid_l.float32()
-
+        if sampling_grid_l.dtype != value_l.dtype:
+            sampling_grid_l = sampling_grid_l.astype(value_l.dtype)
         # grid_sample: (N, C, H, W) + (N, H_out, W_out, 2)
         sampled = nn.grid_sample(
             value_l,
@@ -83,19 +81,11 @@ def multi_scale_deformable_attn_pytorch(
 
     # stack sampled values
     output = (
-        jt.stack(sampling_value_list, dim=-2)
-        .reshape(bs * num_heads, embed_dims, num_queries, num_levels * num_points)
+        jt.flatten(jt.stack(sampling_value_list, dim=-2), -2)
         * attention_weights
-    ).sum(-1)
+    ).sum(-1).view(bs, num_heads * embed_dims, num_queries)
 
-    # (bs, queries, heads*dim)
-    output = (
-        output
-        .reshape(bs, num_heads * embed_dims, num_queries)
-        .transpose(1, 2)
-    )
-
-    return output
+    return output.transpose(1, 2).contiguous()
 
 
 # ------------------------------------------------------------------------
@@ -148,7 +138,8 @@ class MultiScaleDeformableAttention(nn.Module):
 
         self.init_weights()
 
-    # ------------------------------------------------------------------
+    def _reset_parameters(self):
+        return self.init_weights()
 
     def init_weights(self):
         init.constant_(self.sampling_offsets.weight, 0.0)
@@ -173,7 +164,15 @@ class MultiScaleDeformableAttention(nn.Module):
         init.xavier_uniform_(self.output_proj.weight)
         init.constant_(self.output_proj.bias, 0.0)
 
-    # ------------------------------------------------------------------
+    def freeze_sampling_offsets(self):
+        print("Freeze sampling offsets")
+        self.sampling_offsets.weight.requires_grad = False
+        self.sampling_offsets.bias.requires_grad = False
+
+    def freeze_attention_weights(self):
+        print("Freeze attention weights")
+        self.attention_weights.weight.requires_grad = False
+        self.attention_weights.bias.requires_grad = False
 
     def execute(
         self,
@@ -241,7 +240,7 @@ class MultiScaleDeformableAttention(nn.Module):
         else:
             raise ValueError("reference_points must have last dim 2 or 4")
 
-        output = multi_scale_deformable_attn_pytorch(
+        output = multi_scale_deformable_attn_jittor(
             value, spatial_shapes, sampling_locations, attention_weights
         )
 
