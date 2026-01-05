@@ -156,7 +156,7 @@ class MultiScaleDeformableAttention(nn.Module):
         for i in range(self.num_points):
             grid_init[:, :, i, :] *= i + 1
         with jt.no_grad():
-            self.sampling_offsets.bias = grid_init.view(-1)
+            self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
         init.constant_(self.attention_weights.weight, 0.0)
         init.constant_(self.attention_weights.bias, 0.0)
         init.xavier_uniform_(self.value_proj.weight)
@@ -240,9 +240,11 @@ class MultiScaleDeformableAttention(nn.Module):
         else:
             raise ValueError("reference_points must have last dim 2 or 4")
 
-        output = multi_scale_deformable_attn_jittor(
-            value, spatial_shapes, sampling_locations, attention_weights
-        )
+        with jt.no_grad():
+            output = multi_scale_deformable_attn_jittor(
+                value, spatial_shapes, sampling_locations, attention_weights
+            )
+
 
         output = self.output_proj(output)
 

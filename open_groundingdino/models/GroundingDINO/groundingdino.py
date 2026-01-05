@@ -438,7 +438,7 @@ class SetCriterion(nn.Module):
         #     loss_bbox = loss_bbox.reshape(1, -1)
         if debug_enabled():
             jt.sync_all()
-            log_text("loss_boxes after loss_bbox", force=True)
+            log_text("loss_boxes after loss_bbox")
         losses = {}
         losses['loss_bbox'] = loss_bbox.sum() / num_boxes
 
@@ -446,18 +446,18 @@ class SetCriterion(nn.Module):
         tgt_xyxy = box_ops.box_cxcywh_to_xyxy(target_boxes)
         if debug_enabled():
             jt.sync_all()
-            log_text("loss_boxes after xyxy convert", force=True)
+            log_text("loss_boxes after xyxy convert")
         if src_xyxy.shape[0] == 0 or tgt_xyxy.shape[0] == 0:
             losses['loss_giou'] = jt.array(0.0)
         else:
 
             if debug_enabled():
                 jt.sync_all()
-                log_text("loss_boxes before giou", force=True)
+                log_text("loss_boxes before giou")
             loss_giou = 1 - jt.diag(box_ops.generalized_box_iou(src_xyxy, tgt_xyxy))
             if debug_enabled():
                 jt.sync_all()
-                log_text("loss_boxes after giou", force=True)
+                log_text("loss_boxes after giou")
             losses['loss_giou'] = loss_giou.sum() / num_boxes
 
         # calculate the x,y and h,w loss
@@ -583,7 +583,7 @@ class SetCriterion(nn.Module):
         # - index_j is the indices of the corresponding selected targets (in order)
         
         
-        print("Criterion Main Matcher Done!")
+        # print("Criterion Main Matcher Done!")
         # ==== OutOfIndex Code ====
         # for i in range(len(indices)):
         #     tgt_ids[i]=tgt_ids[i][indices[i][1]]
@@ -667,7 +667,7 @@ class SetCriterion(nn.Module):
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         log_text(f"outputs: {outputs.keys()}")
         if 'aux_outputs' in outputs:
-            print("Dealing Aux Outputs!")
+            # print("Dealing Aux Outputs!")
             for idx, aux_outputs in enumerate(outputs['aux_outputs']):
                 indices = []
                 for j in range(len(cat_list)): # bs
@@ -676,7 +676,7 @@ class SetCriterion(nn.Module):
                         'pred_boxes': aux_outputs['pred_boxes'][j].unsqueeze(0)
                     }
                     inds = self.matcher(aux_output_single, [targets[j]], label_map_list[j])
-                    print("Aux Outpus Matcher Done!")
+                    # print("Aux Outpus Matcher Done!")
                     indices.extend(inds)
                 # ==== OutOfIndex Code ====
                 # one_hot_aux = jt.zeros(outputs['pred_logits'].size(),dtype=jt.int64)
@@ -721,7 +721,7 @@ class SetCriterion(nn.Module):
 
         # interm_outputs loss
         if 'interm_outputs' in outputs:
-            print("Dealing Interm Outputs!")
+            # print("Dealing Interm Outputs!")
             interm_outputs = outputs['interm_outputs']
             
             # [修复开始]：获取 Logits 和 Boxes，并修正维度
@@ -737,9 +737,9 @@ class SetCriterion(nn.Module):
                 interm_outputs['pred_boxes'] = pred_boxes 
 
             # 2. 数值稳定性保护 (保持你原有的逻辑，稍作整理)
-            log_text("interm_outputs stats", force=True)
-            log_tensor("interm_outputs.pred_logits", pred_logits, force=True)
-            log_tensor("interm_outputs.pred_boxes", pred_boxes, force=True)
+            log_text("interm_outputs stats")
+            log_tensor("interm_outputs.pred_logits", pred_logits)
+            log_tensor("interm_outputs.pred_boxes", pred_boxes)
 
             if isinstance(pred_boxes, jt.Var):
                 invalid = jt.isnan(pred_boxes) | jt.isinf(pred_boxes)
@@ -764,7 +764,7 @@ class SetCriterion(nn.Module):
                     'pred_boxes': interm_outputs['pred_boxes'][j].unsqueeze(0)
                 }
                 inds = self.matcher(interm_output_single, [targets[j]], label_map_list[j])
-                print("Interm Outputs Matcher Done!")
+                # print("Interm Outputs Matcher Done!")
                 indices.extend(inds)
 
             # ==== Change Code ====

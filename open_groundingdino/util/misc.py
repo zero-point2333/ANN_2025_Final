@@ -457,8 +457,7 @@ def save_on_master(*args, **kwargs):
         function for API compatibility.
     """
     if is_main_process():
-        # You can optionally plug in `jt.save` or `pickle.dump` here if needed.
-        pass
+        jt.save(*args, **kwargs)
 
 
 def init_distributed_mode(args):
