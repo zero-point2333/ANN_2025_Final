@@ -279,8 +279,9 @@ class BiAttentionBlock(nn.Module):
 
         # add layer scale for training stability
         self.drop_path = nn.DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.gamma_v: jt.Var = init_values * jt.ones((v_dim))
-        self.gamma_l: jt.Var = init_values * jt.ones((l_dim))
+        self.gamma_v = nn.Parameter(init_values * jt.ones((v_dim)))
+        self.gamma_l = nn.Parameter(init_values * jt.ones((l_dim)))
+
 
     def execute(self, v: jt.Var, l: jt.Var, attention_mask_v: Optional[jt.Var]=None, attention_mask_l: Optional[jt.Var]=None) -> Tuple[jt.Var, jt.Var]:
         v = self.layer_norm_v(v)
