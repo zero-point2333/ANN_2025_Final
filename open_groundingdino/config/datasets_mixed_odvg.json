@@ -9,8 +9,8 @@
   ],
   "val": [
     {
-      "root": "content/aquarium_data/test",
-      "anno": "content/aquarium_data/test/_annotations.coco.json",
+      "root": "content/aquarium_data/valid",
+      "anno": "content/aquarium_data/valid/_annotations.coco.json",
       "label_map": null,
       "dataset_mode": "coco"
     }

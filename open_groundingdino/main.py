@@ -5,9 +5,25 @@ import datetime
 import json
 import random
 import time
+import itertools
 from pathlib import Path
 import os, sys
 import numpy as np
+from util.compat_sampler import CompatDistributedSampler
+def _get_dist_info():
+    rank = int(os.environ.get("OMPI_COMM_WORLD_RANK", os.environ.get("RANK", "0")))
+    world_size = int(os.environ.get("OMPI_COMM_WORLD_SIZE", os.environ.get("WORLD_SIZE", "1")))
+    local_rank = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK", os.environ.get("LOCAL_RANK", str(rank))))
+    return rank, world_size, local_rank
+
+_rank, _world_size, _local_rank = _get_dist_info()
+_cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+if not _cvd:
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(_local_rank)
+else:
+    _vis = [d.strip() for d in _cvd.split(",") if d.strip() != ""]
+    if len(_vis) > 1 and 0 <= _local_rank < len(_vis):
+        os.environ["CUDA_VISIBLE_DEVICES"] = _vis[_local_rank]
 
 # exe_real = os.path.realpath(sys.executable)
 # py_config = os.path.join(os.path.dirname(exe_real), f"python{sys.version_info.major}.{sys.version_info.minor}-config")
@@ -17,7 +33,11 @@ import numpy as np
 
 import jittor as jt
 from jittor import nn
-from jittor.dataset import DataLoader, SequentialSampler, RandomSampler
+try:
+    from jittor.dataset import DataLoader, SequentialSampler, RandomSampler, DistributedSampler
+except ImportError:
+    from jittor.dataset import DataLoader, SequentialSampler, RandomSampler
+    DistributedSampler = None
 
 from util.get_param_dicts import get_param_dict
 from util.logger import setup_logger
@@ -47,7 +67,12 @@ def get_args_parser():
         'in xxx=yyy format will be merged into config file.')
 
     # dataset parameters
-    parser.add_argument("--datasets", type=str, required=True, help='path to datasets json')
+    parser.add_argument(
+        "--datasets",
+        type=str,
+        default=os.path.join(os.path.dirname(__file__), "config", "datasets_mixed_odvg.json"),
+        help="path to datasets json",
+    )
     parser.add_argument('--remove_difficult', action='store_true')
     parser.add_argument('--fix_size', action='store_true')
 
@@ -95,15 +120,22 @@ def build_model_main(args):
 
 
 def main(args):
-    
-    # utils.setup_distributed(args)
+    if "OMPI_COMM_WORLD_SIZE" in os.environ:
+        args.rank = int(os.environ.get("OMPI_COMM_WORLD_RANK", "0"))
+        args.world_size = int(os.environ.get("OMPI_COMM_WORLD_SIZE", "1"))
+        args.local_rank = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK", str(args.rank)))
+        args.distributed = args.world_size > 1
+    import builtins as _bi
+    _raw_print = _bi.print
+    utils.init_distributed_mode(args)
+    is_master = utils.is_main_process()
     # load cfg file and update the args
     print("Loading config file from {}".format(args.config_file))
     time.sleep(args.rank * 0.02)
     cfg = SLConfig.fromfile(args.config_file)
     if args.options is not None:
         cfg.merge_from_dict(args.options)
-    if args.rank == 0:
+    if is_master:
         save_cfg_path = os.path.join(args.output_dir, "config_cfg.py")
         cfg.dump(save_cfg_path)
         save_json_path = os.path.join(args.output_dir, "config_args_raw.json")
@@ -123,18 +155,26 @@ def main(args):
 
     # setup logger
     os.makedirs(args.output_dir, exist_ok=True)
-    logger = setup_logger(output=os.path.join(args.output_dir, 'info.txt'), distributed_rank=args.rank, color=False, name="detr")
+    logger_output = os.path.join(args.output_dir, 'info.txt') if is_master else None
+    logger = setup_logger(output=logger_output, distributed_rank=args.rank, color=False, name="detr")
+
+    world_size = args.world_size
+    if args.distributed and world_size > 1 and is_master:
+        logger.info("MPI enabled: keep LR/batch scaling in config; do not auto-scale LR in code.")
 
     logger.info("git:\n  {}\n".format(utils.get_sha()))
     logger.info("Command: "+' '.join(sys.argv))
-    if args.rank == 0:
+    if is_master:
         save_json_path = os.path.join(args.output_dir, "config_args_all.json")
         with open(save_json_path, 'w') as f:
             json.dump(vars(args), f, indent=2)
         logger.info("Full config saved to {}".format(save_json_path))
 
+    logger.info(f"datasets json: {args.datasets}")
     with open(args.datasets) as f:
         dataset_meta = json.load(f)
+    if not args.eval and "train" not in dataset_meta:
+        raise KeyError("datasets json missing 'train' section for training.")
     if args.use_coco_eval:
         args.coco_val_path = dataset_meta["val"][0]["anno"]
 
@@ -158,11 +198,7 @@ def main(args):
     # Jittor模型会自动分配到设备
     logger.debug("build model, done.")
 
-    model_without_ddp = model
-    if args.distributed:
-        # 使用Jittor的数据并行
-        model = nn.DataParallel(model)
-        model_without_ddp = model.module
+    model_without_ddp = getattr(model, "module", model)
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info('number of params:'+str(n_parameters))
     # logger.info("params before freezing:\n"+json.dumps({n: p.numel() for n, p in model.named_parameters() if p.requires_grad}, indent=2))
@@ -197,21 +233,70 @@ def main(args):
         logger.debug(f'number of training dataset: {num_of_dataset_train}, samples: {len(dataset_train)}')
 
     dataset_val = build_dataset(image_set='val', args=args, datasetinfo=dataset_meta["val"][0])
-    
 
-    sampler_val = SequentialSampler(dataset_val)
-    if not args.eval:
-        sampler_train = RandomSampler(dataset_train)
+    use_distributed_sampler = args.distributed
+
+    def _build_distributed_sampler(dataset, shuffle, drop_last):
+        # 1) Prefer Jittor's DistributedSampler if available
+        if DistributedSampler is not None:
+            try:
+                return DistributedSampler(
+                    dataset,
+                    num_replicas=args.world_size,
+                    rank=args.rank,
+                    shuffle=shuffle,
+                    seed=args.seed,
+                    drop_last=drop_last,
+                )
+            except TypeError:
+                return DistributedSampler(dataset)
+
+        # 2) Fallback: our compat sampler (works for torch Dataset/VisionDataset)
+        return CompatDistributedSampler(
+            dataset,
+            num_replicas=args.world_size,
+            rank=args.rank,
+            shuffle=shuffle,
+            seed=args.seed,
+            drop_last=drop_last,
+        )
+
+    if use_distributed_sampler:
+        sampler_val = _build_distributed_sampler(dataset_val, shuffle=False, drop_last=False)
+    else:
+        sampler_val = SequentialSampler(dataset_val)
 
     if not args.eval:
-        data_loader_train = DataLoader(dataset_train, sampler=sampler_train, batch_size=args.batch_size, drop_last=True, collate_fn=utils.collate_fn, num_workers=args.num_workers)
+        if use_distributed_sampler:
+            sampler_train = _build_distributed_sampler(dataset_train, shuffle=True, drop_last=True)
+        else:
+            sampler_train = RandomSampler(dataset_train)
+
+        head = list(itertools.islice(iter(sampler_train), 8))
+        print(f"[rank {args.rank}] sampler head: {head}", flush=True)
+
+    if not args.eval:
+        data_loader_train = DataLoader(
+            dataset_train,
+            sampler=sampler_train,
+            batch_size=args.batch_size,
+            drop_last=True,
+            collate_fn=utils.collate_fn,
+            num_workers=args.num_workers,
+        )
         data_loader_train_sz = 0
         for _ in data_loader_train:
             data_loader_train_sz = data_loader_train_sz + 1
         print(f"Data Loader Size: {data_loader_train_sz}")
 
-    data_loader_val = DataLoader(dataset_val, batch_size=4, sampler=sampler_val,
-                                 drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
+    data_loader_val = DataLoader(
+        dataset_val,
+        batch_size=4,
+        sampler=sampler_val,
+        drop_last=False,
+        collate_fn=utils.collate_fn,
+        num_workers=args.num_workers,
+    )
 
     # Jittor的学习率调度器
     if args.onecyclelr: # jt does not have it; args also does not have it
@@ -228,7 +313,7 @@ def main(args):
 
     if args.frozen_weights is not None:
         checkpoint = jt.load(args.frozen_weights)
-        model_without_ddp.detr.load_state_dict(clean_state_dict(checkpoint['model']), strict=False)
+        model_without_ddp.detr.load_state_dict(clean_state_dict(checkpoint['model']))
 
     output_dir = Path(args.output_dir)
     if os.path.exists(os.path.join(args.output_dir, 'checkpoint.pth')):
@@ -242,7 +327,7 @@ def main(args):
             os.unlink(tmp_file.name)
         else:
             checkpoint = jt.load(args.resume)
-        model_without_ddp.load_state_dict(clean_state_dict(checkpoint['model']), strict=False)
+        model_without_ddp.load_state_dict(clean_state_dict(checkpoint['model']))
 
         if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer'])
@@ -268,6 +353,9 @@ def main(args):
         _load_output = model_without_ddp.load_state_dict(_tmp_st)
         logger.info(str(_load_output))
 
+    if jt.mpi:
+        model_without_ddp.mpi_param_broadcast(root=0)
+
     if args.eval:
         os.environ['EVAL_FLAG'] = 'TRUE'
         test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
@@ -290,7 +378,7 @@ def main(args):
     for epoch in range(args.start_epoch, args.epochs):
         print(f"Epoch {epoch} start")
         epoch_start_time = time.time()
-        if args.distributed and not args.eval:
+        if not args.eval and use_distributed_sampler and hasattr(sampler_train, "set_epoch"):
             sampler_train.set_epoch(epoch)
 
         train_stats = train_one_epoch(
@@ -299,7 +387,13 @@ def main(args):
             args=args, logger=(logger if args.save_log else None))
         
         print("Training Done")
-        
+
+        sig = None
+        for p in model_without_ddp.parameters():
+            if getattr(p, "requires_grad", False):
+                sig = float(p.mean().item())
+                break
+        print(f"[rank {args.rank}] epoch={epoch} param_signature={sig}", flush=True)
         if not args.onecyclelr:
             lr_scheduler.step()
         

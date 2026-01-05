@@ -43,9 +43,15 @@ class SmoothedValue(object):
     def synchronize_between_processes(self):
         """
         In the original PyTorch version this synchronized across processes.
-        In the Jittor port we run in single-process mode, so this is a no-op.
+        In the Jittor port this is a no-op unless MPI is enabled.
         """
-        return
+        if not jt.mpi:
+            return
+        totals = jt.array([self.total, self.count])
+        totals = totals.mpi_all_reduce("sum")
+        totals_np = totals.numpy()
+        self.total = float(totals_np[0])
+        self.count = int(totals_np[1])
 
     @property
     def median(self):
@@ -129,9 +135,18 @@ def reduce_dict(input_dict, average=True):
     have the averaged results.
 
     Jittor port note:
-        Since we only run in single-process mode, this is effectively a no-op.
+        When MPI is enabled, use mpi_all_reduce to aggregate across processes.
     """
-    return input_dict
+    if not jt.mpi:
+        return input_dict
+    reduced = {}
+    op = "mean" if average else "sum"
+    for k, v in input_dict.items():
+        if isinstance(v, jt.Var):
+            reduced[k] = v.mpi_all_reduce(op)
+        else:
+            reduced[k] = v
+    return reduced
 
 
 class MetricLogger(object):
@@ -455,17 +470,17 @@ def is_dist_avail_and_initialized():
     Check if distributed training is available and initialized.
 
     Jittor port note:
-        We only support single-process mode here, so this always returns False.
+        Returns True when running under MPI with world_size > 1.
     """
-    return False
+    return jt.mpi and get_world_size() > 1
 
 
 def get_world_size():
-    return 1
+    return int(os.environ.get("OMPI_COMM_WORLD_SIZE", os.environ.get("WORLD_SIZE", "1")))
 
 
 def get_rank():
-    return 0
+    return int(os.environ.get("OMPI_COMM_WORLD_RANK", os.environ.get("RANK", "0")))
 
 
 def is_main_process():
@@ -477,34 +492,53 @@ def save_on_master(*args, **kwargs):
     Save checkpoint on main process.
 
     Jittor port note:
-        For simplicity we disable checkpoint saving here. Keeping the
-        function for API compatibility.
+        Only rank0 writes checkpoints to avoid multi-process conflicts.
     """
-    if is_main_process():
-        # You can optionally plug in `jt.save` or `pickle.dump` here if needed.
-        pass
+    if not is_main_process():
+        return
+    if len(args) >= 2:
+        args = list(args)
+        args[1] = os.fspath(args[1])
+    jt.save(*args, **kwargs)
 
 
 def init_distributed_mode(args):
     """
     Initialize distributed training.
 
-    Jittor port note:
-        Distributed / multi-GPU training is not supported in this port.
-        We force single-process mode and set the relevant attributes on args.
+    Jittor uses MPI (e.g. mpirun) to spawn processes. We read common
+    environment variables and enable distributed mode when world_size > 1.
     """
-    print("Not using distributed mode (Jittor single-process port).")
-    args.distributed = False
-    args.world_size = 1
-    args.rank = 0
-    args.local_rank = 0
-    # keep these attributes for compatibility if other code accesses them
+    rank = int(os.environ.get("OMPI_COMM_WORLD_RANK", os.environ.get("RANK", "0")))
+    world_size = int(os.environ.get("OMPI_COMM_WORLD_SIZE", os.environ.get("WORLD_SIZE", "1")))
+    local_rank = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK", os.environ.get("LOCAL_RANK", str(rank))))
+
+    args.rank = rank
+    args.world_size = world_size
+    args.local_rank = local_rank
+
+    if world_size > 1 and not jt.mpi:
+        print("Jittor MPI is not enabled; falling back to single-process mode.")
+        args.distributed = False
+        args.world_size = 1
+        args.rank = 0
+        args.local_rank = 0
+        setup_for_distributed(True)
+        return
+
+    args.distributed = world_size > 1
     if not hasattr(args, "dist_backend"):
         args.dist_backend = "nccl"
     if not hasattr(args, "dist_url"):
         args.dist_url = "env://"
-    # also ensure printing only from main process
-    setup_for_distributed(True)
+    setup_for_distributed(args.rank == 0)
+
+
+def barrier():
+    if not jt.mpi or get_world_size() <= 1:
+        return
+    token = jt.array([1])
+    token.mpi_all_reduce("sum")
 
 
 def accuracy(output, target, topk=(1,)):

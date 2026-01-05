@@ -3,8 +3,18 @@ import json
 import time
 import os
 import copy
+from glob import glob
 import numpy as np
 from PIL import Image
+
+def _get_dist_info():
+    rank = int(os.environ.get("OMPI_COMM_WORLD_RANK", os.environ.get("RANK", "0")))
+    world_size = int(os.environ.get("OMPI_COMM_WORLD_SIZE", os.environ.get("WORLD_SIZE", "1")))
+    local_rank = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK", os.environ.get("LOCAL_RANK", str(rank))))
+    return rank, world_size, local_rank
+
+_rank, _world_size, _local_rank = _get_dist_info()
+os.environ["CUDA_VISIBLE_DEVICES"] = str(_local_rank)
 
 import jittor as jt
 import jittor.nn as nn
@@ -249,6 +259,38 @@ class LvisGroundingEvaluator:
 # ==========================================
 # Utils
 # ==========================================
+def _is_image_file(path: str) -> bool:
+    ext = os.path.splitext(path)[1].lower()
+    return ext in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+def _collect_images(image_dir: str):
+    images = sorted(
+        p for p in glob(os.path.join(image_dir, "**", "*"), recursive=True)
+        if os.path.isfile(p) and _is_image_file(p)
+    )
+    return images
+
+def _map_image_paths_to_lvis_ids(lvis_api, image_paths, image_dir: str):
+    name_to_id = {}
+    for img_id, info in lvis_api.imgs.items():
+        fname = info.get("file_name", "")
+        if fname:
+            name_to_id.setdefault(fname, img_id)
+            name_to_id.setdefault(os.path.basename(fname), img_id)
+
+    selected_ids = []
+    missing = 0
+    for path in image_paths:
+        rel = os.path.relpath(path, image_dir)
+        img_id = name_to_id.get(rel) or name_to_id.get(os.path.basename(rel))
+        if img_id is None:
+            missing += 1
+            continue
+        selected_ids.append(img_id)
+    if missing:
+        print(f"Warning: {missing} images not found in LVIS annotations.")
+    return selected_ids
+
 def _iter_batches(dataset, batch_size=1):
     total = len(dataset)
     for start in range(0, total, batch_size):
@@ -285,6 +327,14 @@ def chunk_list(lst, n):
 # Main
 # ==========================================
 def main(args):
+    rank, world_size, local_rank = _get_dist_info()
+
+    images = _collect_images(args.image_dir)
+    my_images = images[rank::world_size]
+    if not my_images:
+        print("No images to process for this rank.")
+        return
+
     # config
     cfg = SLConfig.fromfile(args.config_file)
 
@@ -295,6 +345,12 @@ def main(args):
 
     # 1. 使用自定义 Dataset (移除了 transforms 参数)
     dataset = JittorLVISDetection(args.image_dir, args.anno_path)
+    dataset.ids = _map_image_paths_to_lvis_ids(dataset.lvis, my_images, args.image_dir)
+    if not dataset.ids:
+        print("No LVIS images matched for this rank.")
+        return
+
+    output_dir = os.path.join(args.output_dir, f"rank{rank}")
     
     # build post processor
     tokenlizer = get_tokenlizer.get_tokenlizer(cfg.text_encoder_type)
@@ -383,7 +439,7 @@ def main(args):
             evaluator.summarize_subset()
             
     if args.output_dir:
-        res_file = os.path.join(args.output_dir, "results.json")
+        res_file = os.path.join(output_dir, "results.json")
         evaluator.save_results(res_file)
 
     print("All processed. Final evaluation:")
@@ -398,7 +454,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_select", type=int, default=300)
     parser.add_argument("--anno_path", type=str, required=True)
     parser.add_argument("--image_dir", type=str, required=True)
-    parser.add_argument("--output_dir", type=str, default="outputs_lvis")
+    parser.add_argument("--output_dir", type=str, default="outputs")
     
     args = parser.parse_args()
     main(args)

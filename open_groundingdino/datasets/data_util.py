@@ -3,8 +3,9 @@ import os.path as osp
 import shutil
 import time
 import datetime
-import sys
+
 from util.slconfig import SLConfig
+import util.misc as utils
 
 class Error(OSError):
     pass
@@ -157,14 +158,9 @@ def preparing_dataset(pathdict, image_set, args):
     args.copyfilelist = copyfilelist
         
     if args.distributed:
-        torch = sys.modules.get("torch", None)
-        if torch is not None and hasattr(torch, "distributed"):
-            torch.distributed.barrier()
+        utils.barrier()
     total_time = time.time() - start_time
     if copyfilelist:
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         print('Data copy time {}'.format(total_time_str))
     return copyfilelist
-
-
-    

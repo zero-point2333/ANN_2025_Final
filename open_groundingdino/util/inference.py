@@ -2,6 +2,7 @@ from typing import Tuple, List, Any, Dict, Optional
 import os
 import sys
 import bisect
+from glob import glob
 from pathlib import Path
 
 
@@ -9,6 +10,24 @@ import numpy as np
 from PIL import Image
 
 from util.debug_tools import debug_enabled, log_tensor, log_text
+
+def _get_dist_info():
+    rank = int(os.environ.get("OMPI_COMM_WORLD_RANK", os.environ.get("RANK", "0")))
+    world_size = int(os.environ.get("OMPI_COMM_WORLD_SIZE", os.environ.get("WORLD_SIZE", "1")))
+    local_rank = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK", os.environ.get("LOCAL_RANK", str(rank))))
+    return rank, world_size, local_rank
+
+def list_images_by_rank(image_dir: str):
+    images = sorted(
+        p for p in glob(os.path.join(image_dir, "**", "*"), recursive=True)
+        if os.path.isfile(p)
+    )
+    rank, world_size, local_rank = _get_dist_info()
+    return images[rank::world_size], rank, world_size, local_rank
+
+def get_rank_output_dir(output_dir: str = "outputs"):
+    rank, _world_size, _local_rank = _get_dist_info()
+    return os.path.join(output_dir, f"rank{rank}")
 
 def _ensure_jittor_cache_dir() -> None:
     """
@@ -73,6 +92,8 @@ _ensure_python_config()
 os.environ.setdefault("nvcc_path", "")
 # Avoid multiprocessing pool (semlock permission issues in some sandboxes).
 os.environ.setdefault("DISABLE_MULTIPROCESSING", "1")
+_rank, _world_size, _local_rank = _get_dist_info()
+os.environ["CUDA_VISIBLE_DEVICES"] = str(_local_rank)
 
 import jittor as jt
 

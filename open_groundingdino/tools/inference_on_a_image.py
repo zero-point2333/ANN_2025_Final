@@ -54,6 +54,27 @@ def plot_boxes_to_image(image_pil, tgt):
     return image_pil, mask
 
 
+def _get_rank_and_world_size():
+    rank = int(os.environ.get("OMPI_COMM_WORLD_RANK", os.environ.get("RANK", "0")))
+    world_size = int(os.environ.get("OMPI_COMM_WORLD_SIZE", os.environ.get("WORLD_SIZE", "1")))
+    return rank, world_size
+
+
+def _is_image_file(path):
+    ext = os.path.splitext(path)[1].lower()
+    return ext in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+
+def _collect_images(input_path):
+    if os.path.isdir(input_path):
+        entries = [os.path.join(input_path, name) for name in os.listdir(input_path)]
+        files = [p for p in entries if os.path.isfile(p) and _is_image_file(p)]
+        return sorted(files)
+    if os.path.isfile(input_path):
+        return [input_path]
+    raise FileNotFoundError(f"Input path not found: {input_path}")
+
+
 def load_image(image_path):
     # load image
     image_pil = Image.open(image_path).convert("RGB")  # load image
@@ -152,7 +173,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--checkpoint_path", "-p", type=str, required=True, help="path to checkpoint file"
     )
-    parser.add_argument("--image_path", "-i", type=str, required=True, help="path to image file")
+    parser.add_argument("--image_path", "-i", type=str, help="path to image file or directory")
+    parser.add_argument("--image_dir", type=str, default=None, help="path to image directory")
     parser.add_argument("--text_prompt", "-t", type=str, required=True, help="text prompt")
     parser.add_argument(
         "--output_dir", "-o", type=str, default="outputs", required=True, help="output directory"
@@ -173,22 +195,36 @@ if __name__ == "__main__":
     # cfg
     config_file = args.config_file  # change the path of the model config file
     checkpoint_path = args.checkpoint_path  # change the path of the model
-    image_path = args.image_path
+    input_path = args.image_dir if args.image_dir else args.image_path
     text_prompt = args.text_prompt
     output_dir = args.output_dir
     box_threshold = args.box_threshold
     text_threshold = args.text_threshold
     token_spans = args.token_spans
 
+    if not input_path:
+        raise ValueError("Either --image_path or --image_dir must be provided.")
+
+    rank, world_size = _get_rank_and_world_size()
+    is_master = (rank == 0)
+
+    image_list = _collect_images(input_path)
+    if world_size > 1:
+        image_list = image_list[rank::world_size]
+        output_dir = os.path.join(output_dir, f"rank{rank}")
+
+    if is_master:
+        total = len(_collect_images(input_path))
+        print(f"Total images: {total}, world_size={world_size}")
+    if not image_list:
+        if is_master:
+            print("No images to process for this rank.")
+        raise SystemExit(0)
+
     # make dir
     os.makedirs(output_dir, exist_ok=True)
-    # load image
-    image_pil, image = load_image(image_path)
     # load model
     model = load_model(config_file, checkpoint_path, cpu_only=args.cpu_only)
-
-    # visualize raw image
-    image_pil.save(os.path.join(output_dir, "raw_image.jpg"))
 
     # set the text_threshold to None if token_spans is set.
     if token_spans is not None:
@@ -196,19 +232,32 @@ if __name__ == "__main__":
         print("Using token_spans. Set the text_threshold to None.")
 
 
-    # run model
-    boxes_filt, pred_phrases = get_grounding_output(
-        model, image, text_prompt, box_threshold, text_threshold, cpu_only=args.cpu_only, token_spans=token_spans
-    )
+    for image_path in image_list:
+        image_pil, image = load_image(image_path)
+        stem = os.path.splitext(os.path.basename(image_path))[0]
+        if os.path.isdir(input_path) or world_size > 1:
+            raw_name = f"{stem}_raw.jpg"
+            pred_name = f"{stem}_pred.jpg"
+        else:
+            raw_name = "raw_image.jpg"
+            pred_name = "pred.jpg"
 
-    # visualize pred
-    size = image_pil.size
-    pred_dict = {
-        "boxes": boxes_filt,
-        "size": [size[1], size[0]],  # H,W
-        "labels": pred_phrases,
-    }
-    image_with_box = plot_boxes_to_image(image_pil, pred_dict)[0]
-    save_path = os.path.join(output_dir, "pred.jpg")
-    image_with_box.save(save_path)
-    print(f"\n======================\n{save_path} saved.\nThe program runs successfully!")
+        # visualize raw image
+        image_pil.save(os.path.join(output_dir, raw_name))
+
+        # run model
+        boxes_filt, pred_phrases = get_grounding_output(
+            model, image, text_prompt, box_threshold, text_threshold, cpu_only=args.cpu_only, token_spans=token_spans
+        )
+
+        # visualize pred
+        size = image_pil.size
+        pred_dict = {
+            "boxes": boxes_filt,
+            "size": [size[1], size[0]],  # H,W
+            "labels": pred_phrases,
+        }
+        image_with_box = plot_boxes_to_image(image_pil, pred_dict)[0]
+        save_path = os.path.join(output_dir, pred_name)
+        image_with_box.save(save_path)
+        print(f"\n======================\n{save_path} saved.\nThe program runs successfully!")
