@@ -219,11 +219,40 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, output_dir,
         cat_list = args.label_list
     caption = " . ".join(cat_list) + ' .'
     print("Input text prompt:", caption)
+    num_batches = 0
+    num_images = 0
+    num_gt = 0
+    num_pred = 0
 
+    def _count_elems(val):
+        if val is None:
+            return 0
+        if isinstance(val, jt.Var):
+            try:
+                return int(val.shape[0])
+            except Exception:
+                return int(val.numel())
+        try:
+            return int(len(val))
+        except Exception:
+            try:
+                return int(val.shape[0])
+            except Exception:
+                return 0
+
+    def _count_preds(output):
+        if not isinstance(output, dict):
+            return 0
+        for key in ("boxes", "pred_boxes", "scores", "labels"):
+            if key in output:
+                return _count_elems(output[key])
+        return 0
     for samples, targets in metric_logger.log_every(data_loader, 10, header, logger=logger):
         # targets 不需要转 Var，因为这里只是为了取 image_id 和 orig_size
         # 但如果 model output 需要 orig_size 计算，则需要转
-        
+        num_batches += 1
+        num_images += len(targets)
+        num_gt += sum(_count_elems(t.get("labels")) for t in targets if isinstance(t, dict))
         bs = samples.tensors.shape[0]
         input_captions = [caption] * bs
 
@@ -242,6 +271,7 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, output_dir,
         
         # Postprocessing: 返回的结果通常是 {'scores': Var, 'labels': Var, 'boxes': Var}
         results = postprocessors['bbox'](outputs, orig_target_sizes)
+        num_pred += sum(_count_preds(o) for o in results)
 
         if 'segm' in postprocessors.keys():
             target_sizes = jt.stack([jt.array(t["size"]) for t in targets], dim=0)
@@ -290,7 +320,11 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, output_dir,
             if _cnt % 15 == 0:
                 print("BREAK!"*5)
                 break
-
+    rank = getattr(args, "rank", 0)
+    print(
+        f"[rank {rank}] EVAL DONE: batches={num_batches}, images={num_images}, gt={num_gt}, pred={num_pred}",
+        flush=True,
+    )
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     
