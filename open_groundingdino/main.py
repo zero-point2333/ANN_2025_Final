@@ -17,13 +17,13 @@ def _get_dist_info():
     return rank, world_size, local_rank
 
 _rank, _world_size, _local_rank = _get_dist_info()
-_cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
-if not _cvd:
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(_local_rank)
-else:
-    _vis = [d.strip() for d in _cvd.split(",") if d.strip() != ""]
-    if len(_vis) > 1 and 0 <= _local_rank < len(_vis):
-        os.environ["CUDA_VISIBLE_DEVICES"] = _vis[_local_rank]
+# _cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+# if not _cvd:
+#     os.environ["CUDA_VISIBLE_DEVICES"] = str(_local_rank)
+# else:
+#     _vis = [d.strip() for d in _cvd.split(",") if d.strip() != ""]
+#     if len(_vis) > 1 and 0 <= _local_rank < len(_vis):
+#         os.environ["CUDA_VISIBLE_DEVICES"] = _vis[_local_rank]
 
 # exe_real = os.path.realpath(sys.executable)
 # py_config = os.path.join(os.path.dirname(exe_real), f"python{sys.version_info.major}.{sys.version_info.minor}-config")
@@ -202,9 +202,6 @@ def main(args):
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info('number of params:'+str(n_parameters))
     # logger.info("params before freezing:\n"+json.dumps({n: p.numel() for n, p in model.named_parameters() if p.requires_grad}, indent=2))
-
-    param_dicts = get_param_dict(args, model_without_ddp)
-    
     # freeze some layers
     if args.freeze_keywords is not None:
         for name, parameter in model.named_parameters():
@@ -213,6 +210,21 @@ def main(args):
                     assert isinstance(parameter, jt.Var)
                     parameter.requires_grad  = False
                     break
+    param_dicts = get_param_dict(args, model_without_ddp)
+    
+    clean_param_dicts = []
+    for g in param_dicts:
+        if isinstance(g, dict):
+            params = [p for p in g["params"] if getattr(p, "requires_grad", False)]
+            if len(params) > 0:
+                g = g.copy()
+                g["params"] = params
+                clean_param_dicts.append(g)
+        else:
+            clean_param_dicts.append(g)
+
+    param_dicts = clean_param_dicts
+    
     logger.info("params after freezing:\n"+json.dumps({n: p.numel() for n, p in model.named_parameters() if p.requires_grad}, indent=2))
     logger.info("params num after freezing:"+str(len(model.named_parameters())))
 
@@ -329,11 +341,15 @@ def main(args):
             checkpoint = jt.load(args.resume)
         model_without_ddp.load_state_dict(clean_state_dict(checkpoint['model']))
 
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            if 'last_epoch' in checkpoint['lr_scheduler']:
-                lr_scheduler.last_epoch = checkpoint['lr_scheduler']['last_epoch']
+        if not args.eval and 'epoch' in checkpoint:
             args.start_epoch = checkpoint['epoch'] + 1
+            if args.rank == 0:
+                print(
+                    "[Resume] Load model only. "
+                    "Skip optimizer / lr_scheduler (Jittor incompatible).",
+                    flush=True
+                )
+
 
     if (not args.resume) and args.pretrain_model_path:
         checkpoint = jt.load(args.pretrain_model_path)['model']
@@ -412,7 +428,7 @@ def main(args):
                     'args': args,
                 }
 
-                utils.save_on_master(weights, str(checkpoint_path))
+                utils.save_on_master(weights, checkpoint_path)
                 
         # eval
         print("Eval Start")
